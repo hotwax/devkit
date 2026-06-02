@@ -30,7 +30,7 @@ import { homedir } from 'node:os'
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
   host: '127.0.0.1',
-  port: Number(process.env.MOQUI_CONSOLE_PORT) || 7070,
+  port: Number(process.env.MOQUI_CONSOLE_PORT || process.env.PORT) || 7070,
   java11Home: process.env.JAVA11_HOME || '/opt/homebrew/opt/openjdk@11', // mac/Homebrew default
   ports: { moqui: 8080, mysql: 3306, solr: 8983, elasticsearch: 9200 },
   moquiLiveness: 'http://localhost:8080/rest/s1/admin/checkLoginOptions',
@@ -104,9 +104,9 @@ function walkUpForMoqui(start) {
 // ─── small helpers ──────────────────────────────────────────────────────────
 
 // Run a binary, never throw — always resolve {code, stdout, stderr}.
-function run(bin, args, timeout = 6000) {
+function run(bin, args, timeout = 6000, extraEnv = {}) {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout, env: { ...process.env, PATH: SANE_PATH }, maxBuffer: 8 * 1024 * 1024 },
+    execFile(bin, args, { timeout, env: { ...process.env, PATH: SANE_PATH, ...extraEnv }, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => resolve({ code: err?.code ?? 0, stdout: stdout || '', stderr: stderr || '', failed: !!err }))
   })
 }
@@ -713,6 +713,78 @@ async function apiSettings() {
   }
 }
 
+// ─── onboarding wizard (Phase 1: read-only guide — detect state + prescribe the next command) ──
+// Standard setup only: MySQL 8, oms-suite, default ports. No in-flow customization.
+const SETUP_DB = { conf: 'mysql8', host: '127.0.0.1', port: 3306, database: 'moqui', user: 'moqui', password: 'moqui' }
+const SETUP_DEFAULT_WS = join(homedir(), 'moqui-framework')
+const setupWorkspace = () => ((SETTINGS.moquiHome || '').trim() || SETUP_DEFAULT_WS)
+
+async function apiSetupPlan() {
+  const ws = setupWorkspace()
+  const d = await discover()
+  const home = (d.home && existsSync(d.home)) ? d.home : ws
+  const J = CONFIG.java11Home
+  const gradle = (c) => `cd "${home}" && export JAVA_HOME="${J}" && ./gradlew ${c}`
+
+  const [brewOk, gitOk, jdkOk, mysqlBin, mysqlUp, repoProbe, esUp, solr, live] = await Promise.all([
+    run('brew', ['--version']).then((r) => !r.failed),
+    run('git', ['--version']).then((r) => !r.failed),
+    run(CONFIG.java11, ['-version']).then((r) => !r.failed),
+    run('mysql', ['--version']).then((r) => !r.failed),
+    portOwner(SETUP_DB.port).then((o) => o.listening),
+    run('git', ['ls-remote', 'https://github.com/hotwax/oms.git', 'HEAD'], 10000, { GIT_TERMINAL_PROMPT: '0' }).then((r) => !r.failed),
+    portOwner(9200).then((o) => o.listening),
+    probe(CONFIG.solrProbe, 3000).then((r) => r.ok),
+    probe(CONFIG.moquiLiveness, 3000),
+  ])
+  const frameworkOk = looksLikeMoquiHome(home) && existsSync(join(home, 'runtime'))
+  const runtimeOk = existsSync(join(home, 'runtime', 'component'))
+  const maargOk = existsSync(join(home, 'runtime', 'component', 'maarg-docker-config')) && existsSync(join(home, 'myaddons.xml'))
+  const exp = maargOk ? await apiExpectations(CONFIG.expectedComponentSet).catch(() => null) : null
+  const componentsOk = !!(exp && exp.counts && exp.counts.expected > 0 && exp.counts.missing === 0)
+  const repoOk = repoProbe || componentsOk // if the private components are already cloned, access is proven
+  const cfg = await apiConfig().catch(() => null) // effective merged config (authoritative once Moqui has run)
+  let dbConfigured = !!(cfg && cfg.db && cfg.db.conf === 'mysql8' && cfg.db.database)
+  if (!dbConfigured) {
+    try {
+      const x = readFileSync(join(home, 'runtime', 'conf', 'MoquiDevConf.xml'), 'utf8')
+      dbConfigured = /entity_ds_db_conf"\s+value="mysql8"/.test(x) && /entity_ds_database"\s+value="[^"]+"/.test(x)
+    } catch { /* not configured */ }
+  }
+  const omssetupOk = existsSync(join(home, 'runtime', 'conf', 'jwtKey.txt'))
+  const moquiUp = live.ok && live.status === 200
+  const searchOk = esUp || solr
+
+  const steps = [
+    { phase: 'Prerequisites', id: 'brew', title: 'Homebrew', why: 'Package manager for the rest.', status: brewOk ? 'done' : 'warn', manual: !brewOk, detail: brewOk ? 'installed' : 'install in a real Terminal — it prompts for your password', command: brewOk ? null : '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' },
+    { phase: 'Prerequisites', id: 'git', title: 'Git', why: 'To clone Moqui + components.', status: gitOk ? 'done' : 'todo', command: gitOk ? null : 'xcode-select --install   # or: brew install git' },
+    { phase: 'Prerequisites', id: 'jdk11', title: 'JDK 11', why: 'Moqui runs on Java 11.', status: jdkOk ? 'done' : 'todo', detail: jdkOk ? J : 'not found', command: jdkOk ? null : 'brew install openjdk@11' },
+    { phase: 'Prerequisites', id: 'mysql', title: 'MySQL 8', why: 'Standard OMS database.', status: mysqlUp ? 'done' : (mysqlBin ? 'warn' : 'todo'), detail: mysqlUp ? 'running on :3306' : (mysqlBin ? 'installed, not running' : 'not installed'), command: mysqlUp ? null : (mysqlBin ? 'brew services start mysql' : 'brew install mysql && brew services start mysql') },
+    { phase: 'Prerequisites', id: 'node', title: 'Node 18+', why: 'Runs devkit + PWA dev servers.', status: 'done', detail: 'devkit is running on ' + process.version },
+    { phase: 'Prerequisites', id: 'repo', title: 'HotWax repo access', why: 'oms-suite components are private.', status: repoOk ? 'done' : 'warn', detail: repoOk ? 'authenticated to github.com/hotwax' : 'no access detected — add an SSH key or run `gh auth login`', command: repoOk ? null : 'gh auth login   # or add an SSH key with access to github.com/hotwax' },
+
+    { phase: 'Source', id: 'workspace', title: 'Workspace folder', why: 'Where Moqui gets cloned.', status: 'info', editable: true, detail: home + (existsSync(home) ? '  (exists)' : '  (will be created)') },
+    { phase: 'Source', id: 'framework', title: 'Clone moqui-framework', why: 'The Moqui engine.', status: frameworkOk ? 'done' : 'todo', command: frameworkOk ? null : `git clone -b main https://github.com/hotwax/moqui-framework.git "${home}"` },
+    { phase: 'Source', id: 'runtime', title: 'Clone moqui-runtime', why: 'The runtime Moqui loads.', status: runtimeOk ? 'done' : (frameworkOk ? 'todo' : 'blocked'), command: runtimeOk ? null : `cd "${home}" && git clone -b main https://github.com/hotwax/moqui-runtime.git runtime` },
+    { phase: 'Source', id: 'maarg', title: 'Clone maarg-docker-config + myaddons.xml', why: 'Declares the OMS components.', status: maargOk ? 'done' : (runtimeOk ? 'todo' : 'blocked'), command: maargOk ? null : `cd "${home}" && git clone -b main https://github.com/hotwax/hotwax-maarg-docker-config.git runtime/component/maarg-docker-config && cp runtime/component/maarg-docker-config/myaddons.xml myaddons.xml` },
+
+    { phase: 'Components', id: 'components', title: 'Get oms-suite component set', why: 'The 13 standard OMS components.', status: componentsOk ? 'done' : (maargOk ? 'todo' : 'blocked'), detail: exp?.counts ? `${exp.counts.present}/${exp.counts.expected} present` : 'needs maarg-docker-config first', command: componentsOk ? null : gradle('getComponentSet -PcomponentSet=oms-suite') },
+
+    { phase: 'Database', id: 'dbcreate', title: 'Create database + user', why: `Standard db "${SETUP_DB.database}", user "${SETUP_DB.user}".`, status: dbConfigured ? 'done' : (mysqlUp ? 'todo' : 'blocked'), command: `mysql -u root -e "CREATE DATABASE IF NOT EXISTS ${SETUP_DB.database}; CREATE USER IF NOT EXISTS '${SETUP_DB.user}'@'localhost' IDENTIFIED BY '${SETUP_DB.password}'; GRANT ALL ON ${SETUP_DB.database}.* TO '${SETUP_DB.user}'@'localhost'; FLUSH PRIVILEGES;"` },
+    { phase: 'Database', id: 'dbconfig', title: 'Point Moqui at MySQL', why: 'Write the datasource props.', status: dbConfigured ? 'done' : (frameworkOk ? 'todo' : 'blocked'), detail: 'runtime/conf/MoquiDevConf.xml', command: `# add under <entity-facade> in "${home}"/runtime/conf/MoquiDevConf.xml:\n<default-property name="entity_ds_db_conf" value="mysql8"/>\n<default-property name="entity_ds_host" value="${SETUP_DB.host}"/>\n<default-property name="entity_ds_port" value="${SETUP_DB.port}"/>\n<default-property name="entity_ds_database" value="${SETUP_DB.database}"/>\n<default-property name="entity_ds_user" value="${SETUP_DB.user}"/>\n<default-property name="entity_ds_password" value="${SETUP_DB.password}"/>` },
+
+    { phase: 'Initialize', id: 'omssetup', title: 'Run omssetup', why: 'Generates JWT + encryption keys.', status: omssetupOk ? 'done' : (frameworkOk ? 'todo' : 'blocked'), command: gradle('omssetup') },
+    { phase: 'Initialize', id: 'data', title: 'Load seed + install + ext data', why: 'Populates the database (slow, re-runnable).', status: 'todo', detail: 'best-effort detection; safe to re-run', command: `${gradle('loadProduction -Ptypes=seed,seed-initial,install -Praw')}\n${gradle('loadProduction -Ptypes=ext-seed -Praw')}\n${gradle('loadProduction -Ptypes=ext,ext-user -Praw')}` },
+
+    { phase: 'Search (optional)', id: 'search', title: 'OpenSearch / Solr', why: 'Powers search-backed features — optional.', status: searchOk ? 'done' : 'optional', optional: true, command: searchOk ? null : `${gradle('downloadOpenSearch')} && ${gradle('startElasticSearch')}` },
+
+    { phase: 'Run', id: 'run', title: 'Start Moqui', why: 'Launch the server at :8080.', status: moquiUp ? 'done' : (omssetupOk ? 'todo' : 'blocked'), command: moquiUp ? null : gradle('run') },
+  ]
+  const total = steps.filter((s) => s.status !== 'info').length
+  const done = steps.filter((s) => s.status === 'done').length
+  return { workspace: home, java11Home: J, db: SETUP_DB, summary: { done, total }, steps }
+}
+
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 const ROUTES = {
   '/api/discover': apiDiscover,
@@ -723,6 +795,7 @@ const ROUTES = {
   '/api/diagnose': apiDiagnose,
   '/api/topology': apiTopology,
   '/api/local-apps': apiLocalApps,
+  '/api/setup/plan': apiSetupPlan,
 }
 
 const server = createServer(async (req, res) => {

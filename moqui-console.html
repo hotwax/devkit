@@ -592,6 +592,15 @@
     #setup .setup-label { font-weight: 600; margin-bottom: 3px; }
     #setup .setup-val { color: var(--accent); word-break: break-all; }
     #setup button { flex: none; }
+    #view-guide .guide-bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px 4px; flex-wrap: wrap; }
+    #view-guide .guide-prog { flex: 1; min-width: 160px; height: 8px; background: #1e222b; border-radius: 999px; overflow: hidden; }
+    #view-guide .guide-prog>div { height: 100%; background: var(--ok); transition: width .3s; }
+    #view-guide .guide-phase { font: 600 11px var(--mono); color: var(--dim); text-transform: uppercase; letter-spacing: .5px; margin: 16px 16px 2px; }
+    #view-guide .guide-step { padding: 10px 16px; border-top: 1px solid #1e222b; }
+    #view-guide .gs-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    #view-guide .gs-detail { margin-top: 3px; }
+    #view-guide .gs-actions { margin-top: 8px; }
+    #view-guide .cmd code { white-space: pre-wrap; }
   </style>
 </head>
 
@@ -607,6 +616,7 @@
 
   <main>
     <div class="tabs">
+      <button class="tab" data-tab="guide" onclick="switchTab('guide')">Get started</button>
       <button class="tab active" data-tab="arch" onclick="switchTab('arch')">System architecture</button>
       <button class="tab" data-tab="details" onclick="switchTab('details')">Details</button>
     </div>
@@ -637,6 +647,14 @@
       <div class="card" style="margin-top:16px">
         <h2>Running AccxUI apps <span class="muted" id="localAppsCount"></span></h2>
         <div class="body" id="localApps"><span class="muted">checking localhost…</span></div>
+      </div>
+    </section>
+
+    <!-- ── GET STARTED ── -->
+    <section id="view-guide" style="display:none">
+      <div class="card">
+        <h2>Get started <span class="muted">— 0 → ready to dev · standard setup</span></h2>
+        <div class="body" id="guide"><span class="muted">checking your machine…</span></div>
       </div>
     </section>
 
@@ -900,19 +918,43 @@
     }
 
     // ── tabs + wiring ──
-    const loaded = { arch: false, details: false }
+    const loaded = { arch: false, details: false, guide: false }
     function activeTab() { return document.querySelector('.tab.active').dataset.tab }
     function switchTab(name) {
       document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name))
+      $('view-guide').style.display = name === 'guide' ? '' : 'none'
       $('view-architecture').style.display = name === 'arch' ? '' : 'none'
       $('view-details').style.display = name === 'details' ? '' : 'none'
+      if (name === 'guide') { loadGuide(); loaded.guide = true }
       if (name === 'arch') { if (!loaded.arch) { loadTopology(); loadLocalApps(); loaded.arch = true } else { loadLocalApps(); requestAnimationFrame(drawEdges) } }
       if (name === 'details' && !loaded.details) { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs(); loaded.details = true }
     }
     function refreshActive() {
       loadStatus()
-      if (activeTab() === 'arch') { loadTopology(); loadLocalApps() }
+      if (activeTab() === 'guide') loadGuide()
+      else if (activeTab() === 'arch') { loadTopology(); loadLocalApps() }
       else { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs() }
+    }
+
+    // ── get-started guide (read-only: detect + prescribe the next command) ──
+    async function loadGuide() {
+      const g = await j('/api/setup/plan')
+      const chip = { done: 'ok', todo: 'dim', warn: 'warn', blocked: 'dim', optional: 'info', info: 'info' }
+      const phases = [], byPhase = {}
+      g.steps.forEach((s) => { if (!byPhase[s.phase]) { byPhase[s.phase] = []; phases.push(s.phase) } byPhase[s.phase].push(s) })
+      const pct = g.summary.total ? Math.round(100 * g.summary.done / g.summary.total) : 0
+      let html = `<div class="guide-bar"><div class="guide-prog"><div style="width:${pct}%"></div></div>` +
+        `<span class="muted"><b>${g.summary.done}/${g.summary.total}</b> done · workspace <span class="mono">${esc(g.workspace)}</span></span></div>`
+      for (const ph of phases) {
+        html += `<div class="guide-phase">${esc(ph)}</div>`
+        for (const s of byPhase[ph]) {
+          html += `<div class="guide-step"><div class="gs-top">${tag(chip[s.status] || 'dim', s.status)} <b>${esc(s.title)}</b> <span class="muted">${esc(s.why)}</span></div>` +
+            (s.detail ? `<div class="gs-detail muted">${esc(s.detail)}</div>` : '') +
+            (s.editable ? `<div class="gs-actions"><button onclick="pickFolder('moqui')">Change…</button></div>` : '') +
+            (s.command && s.status !== 'done' ? copyBtn(s.command) : '') + `</div>`
+        }
+      }
+      $('guide').innerHTML = html
     }
 
     $('refreshAll').onclick = refreshActive
@@ -943,15 +985,15 @@
       try {
         const r = await fetch('/api/pick-folder', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which }) }).then((x) => x.json())
         $('su-status').textContent = r.ok ? `Set ${which} → ${r.path}` : (r.message || 'Cancelled.')
-        if (r.ok) { await loadSettings(); loadStatus(); loadTopology(); loadLocalApps() }
+        if (r.ok) { await loadSettings(); loadStatus(); loadTopology(); loadLocalApps(); if (loaded.guide) loadGuide() }
       } catch (e) { $('su-status').textContent = 'picker error: ' + e }
     }
 
     // init
     loadStatus(); loadTopology(); loadLocalApps(); loaded.arch = true
-    loadSettings().then((s) => { if (!s.resolvedMoquiHome) $('setup').style.display = '' }) // first-run: open Setup if no Moqui found
+    loadSettings().then((s) => { if (!s.resolvedMoquiHome) switchTab('guide') }) // fresh machine → land on Get started
     setInterval(loadStatus, 5000)
-    setInterval(() => { if (activeTab() === 'arch') { loadTopology(); loadLocalApps() } }, 10000)
+    setInterval(() => { const t = activeTab(); if (t === 'arch') { loadTopology(); loadLocalApps() } else if (t === 'guide') loadGuide() }, 10000)
   </script>
 </body>
 
