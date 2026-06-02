@@ -1,353 +1,856 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Moqui Dev Console</title>
-<style>
-  :root {
-    --bg: #0f1115; --card: #171a21; --line: #262b36; --txt: #d7dce5; --dim: #8a93a3;
-    --ok: #3fb950; --warn: #d29922; --err: #f85149; --info: #58a6ff; --accent: #7c9eff;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--txt); font: 14px/1.5 -apple-system, system-ui, sans-serif; }
-  header { position: sticky; top: 0; z-index: 20; background: #0f1115ee; backdrop-filter: blur(6px);
-    border-bottom: 1px solid var(--line); padding: 12px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
-  .badge { font: 600 10px/1 var(--mono); letter-spacing: .5px; padding: 4px 7px; border-radius: 5px;
-    background: #2a2f3a; color: var(--dim); text-transform: uppercase; }
-  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px;
-    background: #1d2129; border: 1px solid var(--line); font-weight: 600; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
-  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); } .dot.warn { background: var(--warn); } .dot.info { background: var(--info); }
-  .home { font: 12px/1 var(--mono); color: var(--dim); margin-left: auto; }
-  button { font: 500 13px sans-serif; color: var(--txt); background: #232834; border: 1px solid var(--line);
-    padding: 6px 12px; border-radius: 7px; cursor: pointer; }
-  button:hover { background: #2b313e; border-color: #3a4150; }
-  main { max-width: 1120px; margin: 0 auto; padding: 18px 20px 40px; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
-  .tab { background: transparent; border: 1px solid transparent; color: var(--dim); font-weight: 600; padding: 7px 16px; border-radius: 8px; }
-  .tab.active { background: var(--card); border-color: var(--line); color: var(--txt); }
-  .grid { display: grid; gap: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
-  .card > h2 { font-size: 13px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line);
-    color: var(--dim); text-transform: uppercase; letter-spacing: .6px; font-weight: 650; display: flex; gap: 8px; }
-  .card > .body { padding: 6px 16px 14px; }
-  .row { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; border-bottom: 1px solid #1e222b; }
-  .row:last-child { border-bottom: 0; }
-  .row .k { width: 200px; flex: none; color: var(--dim); }
-  .row .v { font-family: var(--mono); font-size: 13px; word-break: break-word; }
-  .tag { font: 600 11px var(--mono); padding: 2px 7px; border-radius: 5px; }
-  .tag.ok { background: #11331c; color: var(--ok); } .tag.err { background: #3a1614; color: var(--err); }
-  .tag.warn { background: #3a2c0e; color: var(--warn); } .tag.info { background: #112742; color: var(--info); }
-  .tag.dim { background: #20242d; color: var(--dim); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #1e222b; }
-  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-  td.mono, .mono { font-family: var(--mono); }
-  tr.drift td { background: #2a200c33; }
-  .branch.drift { color: var(--warn); font-weight: 600; }
-  .finding { padding: 11px 14px; border-radius: 9px; margin: 9px 0; border: 1px solid var(--line); background: #12151b; }
-  .finding.ok { border-left: 3px solid var(--ok); } .finding.warn { border-left: 3px solid var(--warn); }
-  .finding.err { border-left: 3px solid var(--err); } .finding.info { border-left: 3px solid var(--info); }
-  .finding .ttl { font-weight: 650; }
-  .finding .det { color: var(--dim); margin-top: 3px; }
-  .cmd { display: flex; align-items: center; gap: 8px; margin-top: 8px; background: #0c0e12;
-    border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; }
-  .cmd code { font-family: var(--mono); font-size: 12px; color: var(--accent); flex: 1; word-break: break-all; }
-  .cmd button { padding: 3px 9px; font-size: 11px; }
-  pre.log { margin: 0; max-height: 380px; overflow: auto; background: #0c0e12; border-radius: 8px;
-    padding: 12px; font: 12px/1.5 var(--mono); color: #b9c2d0; white-space: pre-wrap; word-break: break-word; }
-  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-  select { background: #232834; color: var(--txt); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
-  label { font-size: 13px; color: var(--dim); }
-  .muted { color: var(--dim); font-size: 12px; }
-  a { color: var(--accent); }
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Moqui Dev Console</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --card: #171a21;
+      --line: #262b36;
+      --txt: #d7dce5;
+      --dim: #8a93a3;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --err: #f85149;
+      --info: #58a6ff;
+      --accent: #7c9eff;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    }
 
-  /* ── architecture diagram ── */
-  .arch-wrap { position: relative; }
-  .diagram { position: relative; padding: 8px 10px 14px; }
-  .edges { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
-  .band { display: flex; align-items: center; gap: 16px; margin: 22px 0; position: relative; z-index: 1; }
-  .band-label { width: 150px; flex: none; color: var(--dim); font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .5px; text-align: right; }
-  .band-nodes { display: flex; gap: 12px; flex-wrap: wrap; flex: 1; justify-content: center; }
-  .node { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 8px;
-    background: #1b1f27; border: 1px solid var(--line); border-left-width: 3px; border-radius: 9px;
-    padding: 9px 13px; cursor: pointer; user-select: none; transition: transform .08s, border-color .12s; }
-  .node:hover { transform: translateY(-1px); border-color: #3a4150; }
-  .node.up { border-left-color: var(--ok); } .node.down { border-left-color: var(--err); }
-  .node.warn { border-left-color: var(--warn); } .node.info { border-left-color: var(--info); }
-  .node.unknown { border-left-color: var(--dim); }
-  .node.absent { border-left-color: var(--dim); opacity: .5; }
-  .node .node-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
-  .node.up .node-dot { background: var(--ok); } .node.down .node-dot { background: var(--err); }
-  .node.warn .node-dot { background: var(--warn); } .node.info .node-dot { background: var(--info); }
-  .node .node-label { font-weight: 550; } .node .node-port { color: var(--dim); font: 12px var(--mono); }
-  .node-open { margin-left: 5px; color: var(--accent); text-decoration: none; font-weight: 700; opacity: .75; }
-  .node-open:hover { opacity: 1; }
-  .nd-open { margin-top: 8px; } .nd-open a { color: var(--accent); font-family: var(--mono); font-size: 12px; }
-  .legend { display: flex; gap: 16px; flex-wrap: wrap; padding: 0 16px 12px; color: var(--dim); font-size: 12px; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .caption { padding: 0 16px 14px; color: var(--dim); font-size: 12.5px; line-height: 1.6; }
-  .node-detail { margin: 0 16px 14px; padding: 12px 14px; background: #12151b; border: 1px solid var(--line); border-radius: 9px; display: none; }
-  .node-detail .nd-detail { color: var(--dim); margin-top: 4px; }
-  .nd-actions { display: flex; gap: 8px; margin-top: 11px; }
-  .nd-actions .act { text-transform: capitalize; font-weight: 600; }
-  .nd-actions .act.start { background: #11331c; border-color: #1c5c30; color: #6ad77f; }
-  .nd-actions .act.stop, .nd-actions .act.restart { background: #2a1a14; border-color: #5c2b1c; color: #f0a58c; }
-</style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--txt);
+      font: 14px/1.5 -apple-system, system-ui, sans-serif;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: #0f1115ee;
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid var(--line);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      font-size: 16px;
+      margin: 0;
+      font-weight: 650;
+      letter-spacing: .2px;
+    }
+
+    .badge {
+      font: 600 10px/1 var(--mono);
+      letter-spacing: .5px;
+      padding: 4px 7px;
+      border-radius: 5px;
+      background: #2a2f3a;
+      color: var(--dim);
+      text-transform: uppercase;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: #1d2129;
+      border: 1px solid var(--line);
+      font-weight: 600;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--dim);
+    }
+
+    .dot.ok {
+      background: var(--ok);
+    }
+
+    .dot.err {
+      background: var(--err);
+    }
+
+    .dot.warn {
+      background: var(--warn);
+    }
+
+    .dot.info {
+      background: var(--info);
+    }
+
+    .home {
+      font: 12px/1 var(--mono);
+      color: var(--dim);
+      margin-left: auto;
+    }
+
+    button {
+      font: 500 13px sans-serif;
+      color: var(--txt);
+      background: #232834;
+      border: 1px solid var(--line);
+      padding: 6px 12px;
+      border-radius: 7px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #2b313e;
+      border-color: #3a4150;
+    }
+
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 18px 20px 40px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+
+    .tab {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--dim);
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 8px;
+    }
+
+    .tab.active {
+      background: var(--card);
+      border-color: var(--line);
+      color: var(--txt);
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      overflow: hidden;
+    }
+
+    .card>h2 {
+      font-size: 13px;
+      margin: 0;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      font-weight: 650;
+      display: flex;
+      gap: 8px;
+    }
+
+    .card>.body {
+      padding: 6px 16px 14px;
+    }
+
+    .row {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      padding: 7px 0;
+      border-bottom: 1px solid #1e222b;
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+    }
+
+    .row .k {
+      width: 200px;
+      flex: none;
+      color: var(--dim);
+    }
+
+    .row .v {
+      font-family: var(--mono);
+      font-size: 13px;
+      word-break: break-word;
+    }
+
+    .tag {
+      font: 600 11px var(--mono);
+      padding: 2px 7px;
+      border-radius: 5px;
+    }
+
+    .tag.ok {
+      background: #11331c;
+      color: var(--ok);
+    }
+
+    .tag.err {
+      background: #3a1614;
+      color: var(--err);
+    }
+
+    .tag.warn {
+      background: #3a2c0e;
+      color: var(--warn);
+    }
+
+    .tag.info {
+      background: #112742;
+      color: var(--info);
+    }
+
+    .tag.dim {
+      background: #20242d;
+      color: var(--dim);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 7px 8px;
+      border-bottom: 1px solid #1e222b;
+    }
+
+    th {
+      color: var(--dim);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+
+    td.mono,
+    .mono {
+      font-family: var(--mono);
+    }
+
+    tr.drift td {
+      background: #2a200c33;
+    }
+
+    .branch.drift {
+      color: var(--warn);
+      font-weight: 600;
+    }
+
+    .finding {
+      padding: 11px 14px;
+      border-radius: 9px;
+      margin: 9px 0;
+      border: 1px solid var(--line);
+      background: #12151b;
+    }
+
+    .finding.ok {
+      border-left: 3px solid var(--ok);
+    }
+
+    .finding.warn {
+      border-left: 3px solid var(--warn);
+    }
+
+    .finding.err {
+      border-left: 3px solid var(--err);
+    }
+
+    .finding.info {
+      border-left: 3px solid var(--info);
+    }
+
+    .finding .ttl {
+      font-weight: 650;
+    }
+
+    .finding .det {
+      color: var(--dim);
+      margin-top: 3px;
+    }
+
+    .cmd {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      background: #0c0e12;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 10px;
+    }
+
+    .cmd code {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+      flex: 1;
+      word-break: break-all;
+    }
+
+    .cmd button {
+      padding: 3px 9px;
+      font-size: 11px;
+    }
+
+    pre.log {
+      margin: 0;
+      max-height: 380px;
+      overflow: auto;
+      background: #0c0e12;
+      border-radius: 8px;
+      padding: 12px;
+      font: 12px/1.5 var(--mono);
+      color: #b9c2d0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    select {
+      background: #232834;
+      color: var(--txt);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 8px;
+    }
+
+    label {
+      font-size: 13px;
+      color: var(--dim);
+    }
+
+    .muted {
+      color: var(--dim);
+      font-size: 12px;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    /* ── architecture diagram ── */
+    .arch-wrap {
+      position: relative;
+    }
+
+    .diagram {
+      position: relative;
+      padding: 8px 10px 14px;
+    }
+
+    .edges {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .band {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin: 22px 0;
+      position: relative;
+      z-index: 1;
+    }
+
+    .band-label {
+      width: 150px;
+      flex: none;
+      color: var(--dim);
+      font: 600 11px var(--mono);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      text-align: right;
+    }
+
+    .band-nodes {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .node {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #1b1f27;
+      border: 1px solid var(--line);
+      border-left-width: 3px;
+      border-radius: 9px;
+      padding: 9px 13px;
+      cursor: pointer;
+      user-select: none;
+      transition: transform .08s, border-color .12s;
+    }
+
+    .node:hover {
+      transform: translateY(-1px);
+      border-color: #3a4150;
+    }
+
+    .node.up {
+      border-left-color: var(--ok);
+    }
+
+    .node.down {
+      border-left-color: var(--err);
+    }
+
+    .node.warn {
+      border-left-color: var(--warn);
+    }
+
+    .node.info {
+      border-left-color: var(--info);
+    }
+
+    .node.unknown {
+      border-left-color: var(--dim);
+    }
+
+    .node.absent {
+      border-left-color: var(--dim);
+      opacity: .5;
+    }
+
+    .node .node-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--dim);
+      flex: none;
+    }
+
+    .node.up .node-dot {
+      background: var(--ok);
+    }
+
+    .node.down .node-dot {
+      background: var(--err);
+    }
+
+    .node.warn .node-dot {
+      background: var(--warn);
+    }
+
+    .node.info .node-dot {
+      background: var(--info);
+    }
+
+    .node .node-label {
+      font-weight: 550;
+    }
+
+    .node .node-port {
+      color: var(--dim);
+      font: 12px var(--mono);
+    }
+
+    .node-open {
+      margin-left: 5px;
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 700;
+      opacity: .75;
+    }
+
+    .node-open:hover {
+      opacity: 1;
+    }
+
+    .nd-open {
+      margin-top: 8px;
+    }
+
+    .nd-open a {
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .legend {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding: 0 16px 12px;
+      color: var(--dim);
+      font-size: 12px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .caption {
+      padding: 0 16px 14px;
+      color: var(--dim);
+      font-size: 12.5px;
+      line-height: 1.6;
+    }
+
+    .node-detail {
+      margin: 0 16px 14px;
+      padding: 12px 14px;
+      background: #12151b;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      display: none;
+    }
+
+    .node-detail .nd-detail {
+      color: var(--dim);
+      margin-top: 4px;
+    }
+
+    .nd-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 11px;
+    }
+
+    .nd-actions .act {
+      text-transform: capitalize;
+      font-weight: 600;
+    }
+
+    .nd-actions .act.start {
+      background: #11331c;
+      border-color: #1c5c30;
+      color: #6ad77f;
+    }
+
+    .nd-actions .act.stop,
+    .nd-actions .act.restart {
+      background: #2a1a14;
+      border-color: #5c2b1c;
+      color: #f0a58c;
+    }
+  </style>
 </head>
+
 <body>
-<header>
-  <h1>Moqui Dev Console</h1>
-  <span class="badge">localhost</span>
-  <span class="pill"><span id="liveDot" class="dot"></span><span id="liveTxt">checking…</span></span>
-  <button id="refreshAll">↻ Refresh</button>
-  <span class="home" id="home">discovering…</span>
-</header>
+  <header>
+    <h1>Moqui Dev Console</h1>
+    <span class="badge">localhost</span>
+    <span class="pill"><span id="liveDot" class="dot"></span><span id="liveTxt">checking…</span></span>
+    <button id="refreshAll">↻ Refresh</button>
+    <span class="home" id="home">discovering…</span>
+  </header>
 
-<main>
-  <div class="tabs">
-    <button class="tab active" data-tab="arch" onclick="switchTab('arch')">System architecture</button>
-    <button class="tab" data-tab="details" onclick="switchTab('details')">Details</button>
-  </div>
-
-  <!-- ── ARCHITECTURE ── -->
-  <section id="view-architecture">
-    <div class="card arch-wrap">
-      <h2>System architecture <span class="muted">— click any box for detail</span></h2>
-      <div class="legend">
-        <span><span class="dot ok"></span> live</span>
-        <span><span class="dot err"></span> down</span>
-        <span><span class="dot warn"></span> degraded</span>
-        <span><span class="dot info"></span> expected-down</span>
-        <span style="font-family:var(--mono)">— calls/connects&nbsp;&nbsp;&nbsp;&middot; &middot; &middot; runs-on</span>
-      </div>
-      <div class="diagram" id="diagram"><span class="muted" style="padding:0 6px">mapping…</span></div>
-      <div class="node-detail" id="node-detail"></div>
-      <p class="caption">Read top → bottom: a <b>PWA</b> you open in the browser calls Moqui's <b>REST API</b>, served by the
-        <b>Moqui app server</b> (running on the <b>Java&nbsp;11 JVM</b>, with its <b>components</b> loaded), which reads and writes
-        <b>MySQL</b> &amp; <b>Solr</b>.</p>
+  <main>
+    <div class="tabs">
+      <button class="tab active" data-tab="arch" onclick="switchTab('arch')">System architecture</button>
+      <button class="tab" data-tab="details" onclick="switchTab('details')">Details</button>
     </div>
-  </section>
 
-  <!-- ── DETAILS ── -->
-  <section id="view-details" style="display:none">
-    <div class="grid">
-      <div class="card"><h2>Diagnose <span class="muted" id="diagCount"></span></h2><div class="body" id="diagnose"><span class="muted">running…</span></div></div>
-      <div class="card"><h2>Preflight</h2><div class="body" id="preflight"><span class="muted">running…</span></div></div>
-      <div class="card"><h2>Effective Config <span class="muted">(MoquiActualConf.xml — secrets redacted)</span></h2><div class="body" id="config"><span class="muted">reading…</span></div></div>
-      <div class="card"><h2>Components <span class="muted">(git branch per checkout)</span></h2><div class="body" id="components"><span class="muted">reading…</span></div></div>
-      <div class="card"><h2>Expected components <span class="muted">— maarg-docker-config · set <select id="expSet"></select></span></h2><div class="body" id="expectations"><span class="muted">checking…</span></div></div>
-      <div class="card"><h2>Logs <span class="muted">(byte-offset tail)</span></h2>
-        <div class="body">
-          <div class="controls">
-            <label>tail <select id="logKb"><option>32</option><option selected>64</option><option>128</option><option>256</option></select> KB</label>
-            <button id="logRefresh">↻ Refresh tail</button>
-            <label><input type="checkbox" id="logAuto" /> auto 5s</label>
-            <span class="muted" id="logMeta"></span>
-          </div>
-          <pre class="log" id="logTail">loading…</pre>
+    <!-- ── ARCHITECTURE ── -->
+    <section id="view-architecture">
+      <div class="card arch-wrap">
+        <h2>System architecture <span class="muted">— click any box for detail</span></h2>
+        <div class="legend">
+          <span><span class="dot ok"></span> live</span>
+          <span><span class="dot err"></span> down</span>
+          <span><span class="dot warn"></span> degraded</span>
+          <span><span class="dot info"></span> expected-down</span>
+          <span style="font-family:var(--mono)">— calls/connects&nbsp;&nbsp;&nbsp;&middot; &middot; &middot;
+            runs-on</span>
         </div>
+        <div class="diagram" id="diagram"><span class="muted" style="padding:0 6px">mapping…</span></div>
+        <div class="node-detail" id="node-detail"></div>
+        <p class="caption">Read top → bottom: a <b>PWA</b> you open in the browser calls Moqui's <b>REST API</b>, served
+          by the
+          <b>Moqui app server</b> (running on the <b>Java&nbsp;11 JVM</b>, with its <b>components</b> loaded), which
+          reads and writes
+          <b>MySQL</b> &amp; <b>Solr</b>.
+        </p>
       </div>
-      <p class="muted">Click a box in <b>System architecture</b> to Start / Stop / Restart it. Stops scope-kill by PID (shown after the action) — never a blanket <code class="mono">pkill</code>. Controls are bound to <code class="mono">127.0.0.1</code> only.</p>
-    </div>
-  </section>
-</main>
+    </section>
 
-<script>
-const $ = (id) => document.getElementById(id)
-const j = (p) => fetch(p).then((r) => r.json())
-const esc = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]))
-const tag = (cls, txt) => `<span class="tag ${cls}">${esc(txt)}</span>`
-const statusClass = (s) => ({ up: 'ok', down: 'err', warn: 'warn', info: 'info' }[s] || 'dim')
+    <!-- ── DETAILS ── -->
+    <section id="view-details" style="display:none">
+      <div class="grid">
+        <div class="card">
+          <h2>Diagnose <span class="muted" id="diagCount"></span></h2>
+          <div class="body" id="diagnose"><span class="muted">running…</span></div>
+        </div>
+        <div class="card">
+          <h2>Preflight</h2>
+          <div class="body" id="preflight"><span class="muted">running…</span></div>
+        </div>
+        <div class="card">
+          <h2>Effective Config <span class="muted">(MoquiActualConf.xml — secrets redacted)</span></h2>
+          <div class="body" id="config"><span class="muted">reading…</span></div>
+        </div>
+        <div class="card">
+          <h2>Components <span class="muted">(git branch per checkout)</span></h2>
+          <div class="body" id="components"><span class="muted">reading…</span></div>
+        </div>
+        <div class="card">
+          <h2>Expected components <span class="muted">— maarg-docker-config · set <select id="expSet"></select></span>
+          </h2>
+          <div class="body" id="expectations"><span class="muted">checking…</span></div>
+        </div>
+        <div class="card">
+          <h2>Logs <span class="muted">(byte-offset tail)</span></h2>
+          <div class="body">
+            <div class="controls">
+              <label>tail <select id="logKb">
+                  <option>32</option>
+                  <option selected>64</option>
+                  <option>128</option>
+                  <option>256</option>
+                </select> KB</label>
+              <button id="logRefresh">↻ Refresh tail</button>
+              <label><input type="checkbox" id="logAuto" /> auto 5s</label>
+              <span class="muted" id="logMeta"></span>
+            </div>
+            <pre class="log" id="logTail">loading…</pre>
+          </div>
+        </div>
+        <p class="muted">Click a box in <b>System architecture</b> to Start / Stop / Restart it. Stops scope-kill by PID
+          (shown after the action) — never a blanket <code class="mono">pkill</code>. Controls are bound to <code
+            class="mono">127.0.0.1</code> only.</p>
+      </div>
+    </section>
+  </main>
 
-function copyBtn(cmd) {
-  return `<div class="cmd"><code>${esc(cmd)}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent);this.textContent='copied'">copy</button></div>`
-}
+  <script>
+    const $ = (id) => document.getElementById(id)
+    const j = (p) => fetch(p).then((r) => r.json())
+    const esc = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]))
+    const tag = (cls, txt) => `<span class="tag ${cls}">${esc(txt)}</span>`
+    const statusClass = (s) => ({ up: 'ok', down: 'err', warn: 'warn', info: 'info' }[s] || 'dim')
 
-// ── header status (always polling) ──
-async function loadStatus() {
-  try {
-    const s = await j('/api/status')
-    const live = s.moquiLive
-    $('liveDot').className = 'dot ' + (live ? 'ok' : (s.port8080 ? 'warn' : 'err'))
-    $('liveTxt').textContent = live ? 'Moqui up' : (s.port8080 ? '8080 held, not answering' : 'Moqui down')
-    $('home').textContent = s.moquiHome ? `${s.moquiHome}${s.pid ? '  ·  pid ' + s.pid : ''}  ·  via ${s.source}` : 'no Moqui checkout found'
-  } catch { $('liveTxt').textContent = 'console error' }
-}
+    function copyBtn(cmd) {
+      return `<div class="cmd"><code>${esc(cmd)}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent);this.textContent='copied'">copy</button></div>`
+    }
 
-// ── architecture diagram ──
-let NODES = {}, TOPO = null
-async function loadTopology() {
-  const t = await j('/api/topology')
-  TOPO = t
-  NODES = {}
-  for (const b of t.bands) for (const n of b.nodes) NODES[n.id] = n
-  const ids = Object.keys(NODES).join(',')
-  const dia = $('diagram')
-  if (dia.dataset.ids !== ids) {              // first render or structure changed → build the DOM
-    dia.dataset.ids = ids
-    dia.innerHTML = `<svg class="edges" id="edges"></svg>` + t.bands.map((b) =>
-      `<div class="band"><div class="band-label">${esc(b.label)}</div><div class="band-nodes">` +
-      b.nodes.map((n) => `<div class="node ${n.status}" id="N-${esc(n.id)}" onclick="showNode('${esc(n.id)}')">` +
-        `<span class="node-dot"></span><span class="node-label">${esc(n.label)}</span>` +
-        (n.port ? `<span class="node-port">:${n.port}</span>` : '') +
-        (n.url ? `<a class="node-open" href="${esc(n.url)}" target="_blank" rel="noopener" title="open ${esc(n.url)}" onclick="event.stopPropagation()">↗</a>` : '') + `</div>`).join('') +
-      `</div></div>`).join('')
-    requestAnimationFrame(drawEdges)
-  } else {                                     // same nodes → recolor in place (no flicker), then redraw edges
-    for (const id in NODES) { const el = $('N-' + id); if (el) el.className = 'node ' + NODES[id].status }
-    drawEdges()
-  }
-}
+    // ── header status (always polling) ──
+    async function loadStatus() {
+      try {
+        const s = await j('/api/status')
+        const live = s.moquiLive
+        $('liveDot').className = 'dot ' + (live ? 'ok' : (s.port8080 ? 'warn' : 'err'))
+        $('liveTxt').textContent = live ? 'Moqui up' : (s.port8080 ? '8080 held, not answering' : 'Moqui down')
+        $('home').textContent = s.moquiHome ? `${s.moquiHome}${s.pid ? '  ·  pid ' + s.pid : ''}  ·  via ${s.source}` : 'no Moqui checkout found'
+      } catch { $('liveTxt').textContent = 'console error' }
+    }
 
-function drawEdges() {
-  const svg = $('edges'), cont = $('diagram')
-  if (!svg || !TOPO || cont.offsetWidth === 0) return
-  const cr = cont.getBoundingClientRect()
-  svg.setAttribute('width', cr.width); svg.setAttribute('height', cr.height)
-  svg.setAttribute('viewBox', `0 0 ${cr.width} ${cr.height}`)
-  const center = (id) => { const e = $('N-' + id); if (!e) return null; const r = e.getBoundingClientRect();
-    return { x: r.left + r.width / 2 - cr.left, y: r.top + r.height / 2 - cr.top } }
-  let out = ''
-  for (const e of TOPO.edges) {
-    const a = center(e.from), b = center(e.to); if (!a || !b) continue
-    const dead = ['down', 'unknown'].includes(NODES[e.from]?.status) || ['down', 'unknown'].includes(NODES[e.to]?.status)
-    const dash = e.kind === 'runs-on' ? 'stroke-dasharray="5 4"' : ''
-    out += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${dead ? '#39414f' : '#4f7bd6'}" stroke-width="1.5" ${dash} opacity="${dead ? .35 : .7}"/>`
-  }
-  svg.innerHTML = out
-}
+    // ── architecture diagram ──
+    let NODES = {}, TOPO = null
+    async function loadTopology() {
+      const t = await j('/api/topology')
+      TOPO = t
+      NODES = {}
+      for (const b of t.bands) for (const n of b.nodes) NODES[n.id] = n
+      const ids = Object.keys(NODES).join(',')
+      const dia = $('diagram')
+      if (dia.dataset.ids !== ids) {              // first render or structure changed → build the DOM
+        dia.dataset.ids = ids
+        dia.innerHTML = `<svg class="edges" id="edges"></svg>` + t.bands.map((b) =>
+          `<div class="band"><div class="band-label">${esc(b.label)}</div><div class="band-nodes">` +
+          b.nodes.map((n) => `<div class="node ${n.status}" id="N-${esc(n.id)}" onclick="showNode('${esc(n.id)}')">` +
+            `<span class="node-dot"></span><span class="node-label">${esc(n.label)}</span>` +
+            (n.port ? `<span class="node-port">:${n.port}</span>` : '') +
+            (n.url ? `<a class="node-open" href="${esc(n.url)}" target="_blank" rel="noopener" title="open ${esc(n.url)}" onclick="event.stopPropagation()">↗</a>` : '') + `</div>`).join('') +
+          `</div></div>`).join('')
+        requestAnimationFrame(drawEdges)
+      } else {                                     // same nodes → recolor in place (no flicker), then redraw edges
+        for (const id in NODES) { const el = $('N-' + id); if (el) el.className = 'node ' + NODES[id].status }
+        drawEdges()
+      }
+    }
 
-function showNode(id) {
-  const n = NODES[id]; if (!n) return
-  const box = $('node-detail'); box.style.display = 'block'
-  let html = `<div>${tag(statusClass(n.status), n.status)} <b>${esc(n.label)}</b>` +
-    (n.port ? ` <span class="muted mono">:${n.port}${n.pid ? ' · pid ' + esc(n.pid) : ''}</span>` : '') + `</div>` +
-    `<div class="nd-detail">${esc(n.detail || '')}</div>`
-  if (n.url) html += `<div class="nd-open"><a href="${esc(n.url)}" target="_blank" rel="noopener">Open ${esc(n.url)} ↗</a></div>`
-  if (n.controls && n.controls.actions && n.controls.actions.length) {
-    html += `<div class="nd-actions">` + n.controls.actions.map((a) =>
-      `<button class="act ${a}" onclick="doAction('${esc(n.controls.target)}','${a}','${esc(n.label)}')">${a}</button>`).join('') + `</div>`
-  }
-  if (n.hint) html += copyBtn(n.hint)
-  box.innerHTML = html
-}
+    function drawEdges() {
+      const svg = $('edges'), cont = $('diagram')
+      if (!svg || !TOPO || cont.offsetWidth === 0) return
+      const cr = cont.getBoundingClientRect()
+      svg.setAttribute('width', cr.width); svg.setAttribute('height', cr.height)
+      svg.setAttribute('viewBox', `0 0 ${cr.width} ${cr.height}`)
+      const center = (id) => {
+        const e = $('N-' + id); if (!e) return null; const r = e.getBoundingClientRect();
+        return { x: r.left + r.width / 2 - cr.left, y: r.top + r.height / 2 - cr.top }
+      }
+      let out = ''
+      for (const e of TOPO.edges) {
+        const a = center(e.from), b = center(e.to); if (!a || !b) continue
+        const dead = ['down', 'unknown'].includes(NODES[e.from]?.status) || ['down', 'unknown'].includes(NODES[e.to]?.status)
+        const dash = e.kind === 'runs-on' ? 'stroke-dasharray="5 4"' : ''
+        out += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${dead ? '#39414f' : '#4f7bd6'}" stroke-width="1.5" ${dash} opacity="${dead ? .35 : .7}"/>`
+      }
+      svg.innerHTML = out
+    }
 
-async function doAction(target, action, label) {
-  if ((action === 'stop' || action === 'restart') && !confirm(`${action} ${label}? This kills the local process.`)) return
-  const box = $('node-detail')
-  box.innerHTML = `<div class="muted">${esc(action)}ing ${esc(label)}…</div>`
-  try {
-    const r = await fetch('/api/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target, action }) }).then((x) => x.json())
-    box.innerHTML = `<div>${tag(r.ok ? 'ok' : 'err', r.ok ? 'done' : 'failed')} <b>${esc(label)}</b> · ${esc(action)}</div>` +
-      `<div class="nd-detail">${esc(r.message || '')}</div>` +
-      (r.killed && r.killed.length ? `<div class="muted">killed pid: ${r.killed.map((k) => esc(k.pid || k)).join(', ')}</div>` : '')
-  } catch (e) { box.innerHTML = `<div class="nd-detail">action error: ${esc(e)}</div>` }
-  loadStatus(); setTimeout(loadTopology, 1500)
-}
+    function showNode(id) {
+      const n = NODES[id]; if (!n) return
+      const box = $('node-detail'); box.style.display = 'block'
+      let html = `<div>${tag(statusClass(n.status), n.status)} <b>${esc(n.label)}</b>` +
+        (n.port ? ` <span class="muted mono">:${n.port}${n.pid ? ' · pid ' + esc(n.pid) : ''}</span>` : '') + `</div>` +
+        `<div class="nd-detail">${esc(n.detail || '')}</div>`
+      if (n.url) html += `<div class="nd-open"><a href="${esc(n.url)}" target="_blank" rel="noopener">Open ${esc(n.url)} ↗</a></div>`
+      if (n.controls && n.controls.actions && n.controls.actions.length) {
+        html += `<div class="nd-actions">` + n.controls.actions.map((a) =>
+          `<button class="act ${a}" onclick="doAction('${esc(n.controls.target)}','${a}','${esc(n.label)}')">${a}</button>`).join('') + `</div>`
+      }
+      if (n.hint) html += copyBtn(n.hint)
+      box.innerHTML = html
+    }
 
-// ── detail panels (unchanged logic) ──
-async function loadDiagnose() {
-  const d = await j('/api/diagnose'); const f = d.findings || []
-  $('diagCount').textContent = f.length ? `(${f.length})` : ''
-  $('diagnose').innerHTML = f.length ? f.map((x) =>
-    `<div class="finding ${x.severity}"><div class="ttl">${tag(x.severity, x.severity)} ${esc(x.title)}</div>` +
-    (x.detail ? `<div class="det">${esc(x.detail)}</div>` : '') + (x.command ? copyBtn(x.command) : '') + `</div>`).join('') : '<span class="muted">no findings</span>'
-}
-function portRow(label, p) {
-  const v = p.listening ? `${tag('ok', 'listening')} <span class="mono">pid ${esc(p.pid)} · ${esc(p.command)}</span>` : tag('err', 'free / down')
-  return `<div class="row"><div class="k">port ${p.expected} · ${label}</div><div class="v">${v}</div></div>`
-}
-async function loadPreflight() {
-  const p = await j('/api/preflight')
-  $('preflight').innerHTML =
-    `<div class="row"><div class="k">Java 11 (explicit path)</div><div class="v">${p.java11.ok ? tag('ok', 'ok') : tag('err', 'missing')} ${esc(p.java11.detail)}</div></div>` +
-    `<div class="row"><div class="k">bare \`java\` on PATH</div><div class="v">${p.bareJava.ok ? tag('ok', 'present') : tag('info', 'not on PATH')} <span class="muted">${esc(p.bareJava.detail)}</span></div></div>` +
-    portRow('Moqui', p.ports.moqui) + portRow('MySQL', p.ports.mysql) + portRow('Solr', p.ports.solr) + portRow('ElasticSearch', p.ports.elasticsearch) +
-    `<div class="row"><div class="k">Moqui liveness</div><div class="v">${p.moquiLive ? tag('ok', 'serving') : tag('err', 'no')} <span class="muted">${esc(p.moquiLiveDetail)}</span></div></div>` +
-    `<div class="row"><div class="k">Solr reachable</div><div class="v">${p.solrAlive ? tag('ok', 'alive') : tag('err', 'no')} <span class="muted">${esc(p.solrDetail)}</span></div></div>`
-}
-async function loadConfig() {
-  const c = await j('/api/config'); if (c.error) { $('config').innerHTML = tag('err', 'error') + ' ' + esc(c.error); return }
-  const db = c.db || {}
-  $('config').innerHTML =
-    `<div class="row"><div class="k">Database</div><div class="v">${esc(db.conf)} · <b>${esc(db.database)}</b> @ ${esc(db.host)}:${esc(db.port)} · user ${esc(db.user)}</div></div>` +
-    `<div class="row"><div class="k">Search backends (config)</div><div class="v">${(c.searchRefs || []).map((u) => `<span class="mono">${esc(u)}</span>`).join('<br>') || '<span class="muted">none</span>'}</div></div>` +
-    `<div class="row"><div class="k">Instance</div><div class="v">${esc(c.instance?.name)} · id ${esc(c.instance?.id)} · purpose ${esc(c.instance?.purpose)}</div></div>` +
-    `<div class="row"><div class="k">Solr</div><div class="v">cloud=${esc(c.notable?.solr_cloud)} · cores: ${esc(c.notable?.solr_cores)}</div></div>` +
-    `<div class="row"><div class="k">Shopify API / locale</div><div class="v">${esc(c.notable?.shopify_api_version)} · ${esc(c.notable?.locale)}</div></div>` +
-    `<div class="row"><div class="k">Source</div><div class="v muted">${esc(c.confPath)}</div></div>`
-}
-async function loadComponents() {
-  const c = await j('/api/components'); if (c.error) { $('components').innerHTML = tag('err', 'error') + ' ' + esc(c.error); return }
-  const rows = c.components.map((x) =>
-    `<tr class="${x.drift || x.dirty ? 'drift' : ''}"><td class="mono">${esc(x.name)}</td>` +
-    `<td><span class="branch ${x.drift ? 'drift' : ''}">${esc(x.branch || '—')}</span>` +
-      `${x.drift ? ' ' + tag('warn', 'off main') : ''}` +
-      `${x.dirty ? ' ' + tag('warn', x.modified + ' uncommitted') : ''}` +
-      `${x.untracked ? ' ' + tag('dim', '+' + x.untracked + ' untracked') : ''}</td>` +
-    `<td class="mono muted">${esc(x.target || (x.isLink ? '(link)' : '(dir)'))}</td></tr>`).join('')
-  const drift = c.components.filter((x) => x.drift).length
-  const dirty = c.components.filter((x) => x.dirty).length
-  $('components').innerHTML = `<p class="muted">${c.components.length} components${drift ? ` · ${drift} off <b>main</b>` : ''}${dirty ? ` · ${dirty} with <b>local changes</b>` : ''}</p>` +
-    `<table><thead><tr><th>component</th><th>branch / local state</th><th>checkout</th></tr></thead><tbody>${rows}</tbody></table>`
-}
-async function loadExpectations() {
-  const sel = $('expSet'); const set = sel && sel.value ? sel.value : ''
-  const e = await j('/api/expectations' + (set ? '?set=' + set : ''))
-  if (e.error) { $('expectations').innerHTML = tag('err', 'error') + ' ' + esc(e.error); return }
-  if (sel && !sel.dataset.filled && e.setOptions) {
-    sel.innerHTML = e.setOptions.map((s) => `<option ${s === e.set ? 'selected' : ''}>${esc(s)}</option>`).join(''); sel.dataset.filled = '1'
-  }
-  const c = e.counts
-  let html = `<p class="muted">${c.present}/${c.expected} present` +
-    (c.missing ? ` · <span style="color:var(--warn)">${c.missing} missing</span>` : ' · ' + tag('ok', 'complete')) +
-    (c.extra ? ` · ${c.extra} extra` : '') + `</p>`
-  if (e.missing.length) html += `<div class="row"><div class="k">Missing</div><div class="v">${e.missing.map((m) => esc(m.name)).join(', ')}</div></div>` + copyBtn(e.setCommand)
-  if (e.extra.length) html += `<div class="row"><div class="k">Extra (not in set)</div><div class="v mono muted">${e.extra.map(esc).join(', ')}</div></div>`
-  html += `<div class="row"><div class="k">Source</div><div class="v muted mono">${esc(e.manifestPath || 'manifest not found')}</div></div>`
-  $('expectations').innerHTML = html
-}
+    async function doAction(target, action, label) {
+      if ((action === 'stop' || action === 'restart') && !confirm(`${action} ${label}? This kills the local process.`)) return
+      const box = $('node-detail')
+      box.innerHTML = `<div class="muted">${esc(action)}ing ${esc(label)}…</div>`
+      try {
+        const r = await fetch('/api/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target, action }) }).then((x) => x.json())
+        box.innerHTML = `<div>${tag(r.ok ? 'ok' : 'err', r.ok ? 'done' : 'failed')} <b>${esc(label)}</b> · ${esc(action)}</div>` +
+          `<div class="nd-detail">${esc(r.message || '')}</div>` +
+          (r.killed && r.killed.length ? `<div class="muted">killed pid: ${r.killed.map((k) => esc(k.pid || k)).join(', ')}</div>` : '')
+      } catch (e) { box.innerHTML = `<div class="nd-detail">action error: ${esc(e)}</div>` }
+      loadStatus(); setTimeout(loadTopology, 1500)
+    }
 
-async function loadLogs() {
-  const kb = $('logKb').value; $('logTail').textContent = 'loading…'
-  const l = await j('/api/logs?kb=' + kb); if (l.error) { $('logTail').textContent = l.error; return }
-  $('logMeta').textContent = `${(l.size / 1048576).toFixed(1)} MB total · last ${(l.shown / 1024).toFixed(0)} KB`
-  $('logTail').textContent = l.tail; $('logTail').scrollTop = $('logTail').scrollHeight
-}
+    // ── detail panels (unchanged logic) ──
+    async function loadDiagnose() {
+      const d = await j('/api/diagnose'); const f = d.findings || []
+      $('diagCount').textContent = f.length ? `(${f.length})` : ''
+      $('diagnose').innerHTML = f.length ? f.map((x) =>
+        `<div class="finding ${x.severity}"><div class="ttl">${tag(x.severity, x.severity)} ${esc(x.title)}</div>` +
+        (x.detail ? `<div class="det">${esc(x.detail)}</div>` : '') + (x.command ? copyBtn(x.command) : '') + `</div>`).join('') : '<span class="muted">no findings</span>'
+    }
+    function portRow(label, p) {
+      const v = p.listening ? `${tag('ok', 'listening')} <span class="mono">pid ${esc(p.pid)} · ${esc(p.command)}</span>` : tag('err', 'free / down')
+      return `<div class="row"><div class="k">port ${p.expected} · ${label}</div><div class="v">${v}</div></div>`
+    }
+    async function loadPreflight() {
+      const p = await j('/api/preflight')
+      $('preflight').innerHTML =
+        `<div class="row"><div class="k">Java 11 (explicit path)</div><div class="v">${p.java11.ok ? tag('ok', 'ok') : tag('err', 'missing')} ${esc(p.java11.detail)}</div></div>` +
+        `<div class="row"><div class="k">bare \`java\` on PATH</div><div class="v">${p.bareJava.ok ? tag('ok', 'present') : tag('info', 'not on PATH')} <span class="muted">${esc(p.bareJava.detail)}</span></div></div>` +
+        portRow('Moqui', p.ports.moqui) + portRow('MySQL', p.ports.mysql) + portRow('Solr', p.ports.solr) + portRow('ElasticSearch', p.ports.elasticsearch) +
+        `<div class="row"><div class="k">Moqui liveness</div><div class="v">${p.moquiLive ? tag('ok', 'serving') : tag('err', 'no')} <span class="muted">${esc(p.moquiLiveDetail)}</span></div></div>` +
+        `<div class="row"><div class="k">Solr reachable</div><div class="v">${p.solrAlive ? tag('ok', 'alive') : tag('err', 'no')} <span class="muted">${esc(p.solrDetail)}</span></div></div>`
+    }
+    async function loadConfig() {
+      const c = await j('/api/config'); if (c.error) { $('config').innerHTML = tag('err', 'error') + ' ' + esc(c.error); return }
+      const db = c.db || {}
+      $('config').innerHTML =
+        `<div class="row"><div class="k">Database</div><div class="v">${esc(db.conf)} · <b>${esc(db.database)}</b> @ ${esc(db.host)}:${esc(db.port)} · user ${esc(db.user)}</div></div>` +
+        `<div class="row"><div class="k">Search backends (config)</div><div class="v">${(c.searchRefs || []).map((u) => `<span class="mono">${esc(u)}</span>`).join('<br>') || '<span class="muted">none</span>'}</div></div>` +
+        `<div class="row"><div class="k">Instance</div><div class="v">${esc(c.instance?.name)} · id ${esc(c.instance?.id)} · purpose ${esc(c.instance?.purpose)}</div></div>` +
+        `<div class="row"><div class="k">Solr</div><div class="v">cloud=${esc(c.notable?.solr_cloud)} · cores: ${esc(c.notable?.solr_cores)}</div></div>` +
+        `<div class="row"><div class="k">Shopify API / locale</div><div class="v">${esc(c.notable?.shopify_api_version)} · ${esc(c.notable?.locale)}</div></div>` +
+        `<div class="row"><div class="k">Source</div><div class="v muted">${esc(c.confPath)}</div></div>`
+    }
+    async function loadComponents() {
+      const c = await j('/api/components'); if (c.error) { $('components').innerHTML = tag('err', 'error') + ' ' + esc(c.error); return }
+      const rows = c.components.map((x) =>
+        `<tr class="${x.drift || x.dirty ? 'drift' : ''}"><td class="mono">${esc(x.name)}</td>` +
+        `<td><span class="branch ${x.drift ? 'drift' : ''}">${esc(x.branch || '—')}</span>` +
+        `${x.drift ? ' ' + tag('warn', 'off main') : ''}` +
+        `${x.dirty ? ' ' + tag('warn', x.modified + ' uncommitted') : ''}` +
+        `${x.untracked ? ' ' + tag('dim', '+' + x.untracked + ' untracked') : ''}</td>` +
+        `<td class="mono muted">${esc(x.target || (x.isLink ? '(link)' : '(dir)'))}</td></tr>`).join('')
+      const drift = c.components.filter((x) => x.drift).length
+      const dirty = c.components.filter((x) => x.dirty).length
+      $('components').innerHTML = `<p class="muted">${c.components.length} components${drift ? ` · ${drift} off <b>main</b>` : ''}${dirty ? ` · ${dirty} with <b>local changes</b>` : ''}</p>` +
+        `<table><thead><tr><th>component</th><th>branch / local state</th><th>checkout</th></tr></thead><tbody>${rows}</tbody></table>`
+    }
+    async function loadExpectations() {
+      const sel = $('expSet'); const set = sel && sel.value ? sel.value : ''
+      const e = await j('/api/expectations' + (set ? '?set=' + set : ''))
+      if (e.error) { $('expectations').innerHTML = tag('err', 'error') + ' ' + esc(e.error); return }
+      if (sel && !sel.dataset.filled && e.setOptions) {
+        sel.innerHTML = e.setOptions.map((s) => `<option ${s === e.set ? 'selected' : ''}>${esc(s)}</option>`).join(''); sel.dataset.filled = '1'
+      }
+      const c = e.counts
+      let html = `<p class="muted">${c.present}/${c.expected} present` +
+        (c.missing ? ` · <span style="color:var(--warn)">${c.missing} missing</span>` : ' · ' + tag('ok', 'complete')) +
+        (c.extra ? ` · ${c.extra} extra` : '') + `</p>`
+      if (e.missing.length) html += `<div class="row"><div class="k">Missing</div><div class="v">${e.missing.map((m) => esc(m.name)).join(', ')}</div></div>` + copyBtn(e.setCommand)
+      if (e.extra.length) html += `<div class="row"><div class="k">Extra (not in set)</div><div class="v mono muted">${e.extra.map(esc).join(', ')}</div></div>`
+      html += `<div class="row"><div class="k">Source</div><div class="v muted mono">${esc(e.manifestPath || 'manifest not found')}</div></div>`
+      $('expectations').innerHTML = html
+    }
 
-// ── tabs + wiring ──
-const loaded = { arch: false, details: false }
-function activeTab() { return document.querySelector('.tab.active').dataset.tab }
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name))
-  $('view-architecture').style.display = name === 'arch' ? '' : 'none'
-  $('view-details').style.display = name === 'details' ? '' : 'none'
-  if (name === 'arch') { if (!loaded.arch) { loadTopology(); loaded.arch = true } else requestAnimationFrame(drawEdges) }
-  if (name === 'details' && !loaded.details) { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs(); loaded.details = true }
-}
-function refreshActive() {
-  loadStatus()
-  if (activeTab() === 'arch') loadTopology()
-  else { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs() }
-}
+    async function loadLogs() {
+      const kb = $('logKb').value; $('logTail').textContent = 'loading…'
+      const l = await j('/api/logs?kb=' + kb); if (l.error) { $('logTail').textContent = l.error; return }
+      $('logMeta').textContent = `${(l.size / 1048576).toFixed(1)} MB total · last ${(l.shown / 1024).toFixed(0)} KB`
+      $('logTail').textContent = l.tail; $('logTail').scrollTop = $('logTail').scrollHeight
+    }
 
-$('refreshAll').onclick = refreshActive
-let logTimer = null
-$('logAuto').onchange = (e) => { clearInterval(logTimer); if (e.target.checked) logTimer = setInterval(loadLogs, 5000) }
-$('logRefresh').onclick = loadLogs
-$('logKb').onchange = loadLogs
-$('expSet').onchange = loadExpectations
-let rt = null
-window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawEdges, 120) })
+    // ── tabs + wiring ──
+    const loaded = { arch: false, details: false }
+    function activeTab() { return document.querySelector('.tab.active').dataset.tab }
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name))
+      $('view-architecture').style.display = name === 'arch' ? '' : 'none'
+      $('view-details').style.display = name === 'details' ? '' : 'none'
+      if (name === 'arch') { if (!loaded.arch) { loadTopology(); loaded.arch = true } else requestAnimationFrame(drawEdges) }
+      if (name === 'details' && !loaded.details) { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs(); loaded.details = true }
+    }
+    function refreshActive() {
+      loadStatus()
+      if (activeTab() === 'arch') loadTopology()
+      else { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs() }
+    }
 
-// init
-loadStatus(); loadTopology(); loaded.arch = true
-setInterval(loadStatus, 5000)
-setInterval(() => { if (activeTab() === 'arch') loadTopology() }, 10000)
-</script>
+    $('refreshAll').onclick = refreshActive
+    let logTimer = null
+    $('logAuto').onchange = (e) => { clearInterval(logTimer); if (e.target.checked) logTimer = setInterval(loadLogs, 5000) }
+    $('logRefresh').onclick = loadLogs
+    $('logKb').onchange = loadLogs
+    $('expSet').onchange = loadExpectations
+    let rt = null
+    window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawEdges, 120) })
+
+    // init
+    loadStatus(); loadTopology(); loaded.arch = true
+    setInterval(loadStatus, 5000)
+    setInterval(() => { if (activeTab() === 'arch') loadTopology() }, 10000)
+  </script>
 </body>
+
 </html>
