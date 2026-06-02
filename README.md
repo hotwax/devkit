@@ -18,6 +18,8 @@ A dashboard at `http://127.0.0.1:7070` with two tabs:
 - **System architecture** — a live, color-coded map from the **Java 11 JVM → MySQL / Solr → Moqui →
   REST API → PWA apps**. Click any box for detail; running web nodes have an `↗` open link; click
   **Start / Stop / Restart** to control Moqui, MySQL, or a PWA dev server.
+- **Running AccxUI apps** — detects localhost Vite/PWA servers, maps them back to app names and
+  serving folders, and shows direct links so you do not have to remember which app owns which URL.
 - **Details** —
   - **Preflight**: Java 11, ports (8080 / 3306 / 8983 / 9200), MySQL & Solr reachability, Moqui liveness.
   - **Effective config**: parsed from `runtime/log/MoquiActualConf.xml` (DB, search backends; secrets redacted).

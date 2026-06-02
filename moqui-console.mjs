@@ -11,18 +11,21 @@
 //   loaded components + git branch/dirty state · EXPECTED components (maarg-docker-config myaddons.xml) ·
 //   a JVM→data→Moqui→REST→PWA topology with click-to-Start/Stop/Restart · log tail · diagnose.
 //
-// If run inside an accxui-style PWA workspace it also manages the PWA dev servers; otherwise it
-// runs in Moqui-only mode. Configure per-project with a `devkit.config.json` in your working dir,
-// or env: MOQUI_HOME, MOQUI_RUN_SCRIPT, JAVA11_HOME, MOQUI_CONSOLE_PORT, MOQUI_CONSOLE_NO_PWA=1.
+// First run: open the dashboard, click Setup (⚙) and pick your Moqui project folder (and your accxui
+// workspace folder, to manage the PWAs). Choices persist in ~/.config/devkit/settings.json, so it
+// works the same no matter where you launched it from. Also overridable per-project via a
+// `devkit.config.json` in the working dir, or env: MOQUI_HOME, MOQUI_RUN_SCRIPT, JAVA11_HOME,
+// MOQUI_CONSOLE_PORT, MOQUI_CONSOLE_NO_PWA=1.
 //
 // Zero dependencies, no build step. Requires Node 18+ (global fetch). Verified on Node 25.
 
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import { readFile, open, readdir, lstat, readlink, realpath, mkdir } from 'node:fs/promises'
-import { existsSync, openSync, writeFileSync, readFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { existsSync, openSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
+import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { homedir } from 'node:os'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -63,9 +66,23 @@ CONFIG.startHint = CONFIG.startHint || (CONFIG.moquiRunScript
   ? `screen -dmS ${CONFIG.screens.moqui} bash ${CONFIG.moquiRunScript}`
   : 'Start the Moqui box above (or run ./gradlew run with JAVA_HOME set)')
 
-// Is the working dir an accxui-style PWA workspace? If not, it's "Moqui-only" mode (PWA band off).
-const HAS_PWA_WORKSPACE = !process.env.MOQUI_CONSOLE_NO_PWA &&
-  (existsSync(join(CWD, 'pnpm-workspace.yaml')) || existsSync(join(CWD, 'apps')))
+// Persistent, machine-global settings (the folders the dev picked). Survives `npx` runs, unlike CWD.
+const SETTINGS_PATH = join(homedir(), '.config', 'devkit', 'settings.json')
+let SETTINGS = {}
+try { SETTINGS = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8')) || {} } catch { SETTINGS = {} }
+function saveSettings() {
+  try { mkdirSync(dirname(SETTINGS_PATH), { recursive: true }); writeFileSync(SETTINGS_PATH, JSON.stringify(SETTINGS, null, 2)); return true }
+  catch { return false }
+}
+
+// The PWA workspace root: the folder the dev picked, else the working dir if it already looks like one.
+// null ⇒ Moqui-only mode (PWA band off). Recomputed each call so the folder picker takes effect live.
+function accxuiRoot() {
+  if (process.env.MOQUI_CONSOLE_NO_PWA) return null
+  if (SETTINGS.accxuiHome && existsSync(SETTINGS.accxuiHome)) return SETTINGS.accxuiHome
+  if (existsSync(join(CWD, 'pnpm-workspace.yaml')) || existsSync(join(CWD, 'apps'))) return CWD
+  return null
+}
 
 // Does `dir` look like a Moqui home (framework root / checkout)?
 function looksLikeMoquiHome(dir) {
@@ -122,6 +139,145 @@ async function portOwner(port) {
   return { listening: true, pid, command }
 }
 
+function parseListenPort(name) {
+  const m = String(name || '').match(/:(\d+)$/)
+  return m ? Number(m[1]) : null
+}
+
+async function listeningTcpPorts() {
+  const r = await run('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fpcn'])
+  const out = []
+  let pid = null, command = null
+  for (const line of r.stdout.split('\n')) {
+    if (!line) continue
+    if (line[0] === 'p') { pid = line.slice(1); command = null }
+    else if (line[0] === 'c') command = line.slice(1)
+    else if (line[0] === 'n' && pid) {
+      const name = line.slice(1)
+      const port = parseListenPort(name)
+      if (port) out.push({ pid, command, name, port })
+    }
+  }
+  const seen = new Set()
+  return out.filter((p) => {
+    const key = `${p.pid}:${p.port}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+async function pidCwd(pid) {
+  const r = await run('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'])
+  const line = r.stdout.split('\n').find((l) => l[0] === 'n')
+  if (!line) return ''
+  try { return await realpath(line.slice(1)) } catch { return line.slice(1) }
+}
+
+async function pidArgs(pid) {
+  const r = await run('ps', ['-p', String(pid), '-o', 'command='])
+  return r.stdout.trim()
+}
+
+async function readJsonFile(path) {
+  try { return JSON.parse(await readFile(path, 'utf8')) } catch { return null }
+}
+
+async function accxuiAppCatalog(root) {
+  if (!root) return []
+  const byDir = new Map()
+  const add = async (entry) => {
+    const dir = pwaDir(entry, root)
+    if (!dir || !existsSync(dir)) return
+    let realDir = dir
+    try { realDir = await realpath(dir) } catch { /* keep dir */ }
+    const pkg = await readJsonFile(join(realDir, 'package.json')) || await readJsonFile(join(dir, 'package.json')) || {}
+    const existing = byDir.get(realDir) || {}
+    const name = existing.name || entry.name || pkg.name || basename(realDir)
+    const packageName = pkg.name || name
+    byDir.set(realDir, {
+      ...existing,
+      ...entry,
+      port: entry.port ?? existing.port,
+      filter: entry.filter ?? existing.filter,
+      name,
+      packageName,
+      dir,
+      realDir,
+      aliases: [...new Set([...(existing.aliases || []), entry.name, entry.filter, packageName, basename(dir), basename(realDir)].filter(Boolean))],
+    })
+  }
+
+  for (const app of CONFIG.pwaApps) await add(app)
+  let appDirs = []
+  try { appDirs = await readdir(join(root, 'apps')) } catch { /* no apps dir */ }
+  for (const appDir of appDirs) {
+    const dir = join(root, 'apps', appDir)
+    if (!existsSync(join(dir, 'package.json'))) continue
+    const pkg = await readJsonFile(join(dir, 'package.json')) || {}
+    await add({ name: pkg.name || appDir, dir: join('apps', appDir) })
+  }
+  return [...byDir.values()]
+}
+
+function commandHasApp(command, app) {
+  const cmd = String(command || '')
+  return app.aliases.some((alias) =>
+    cmd.includes(`--filter ${alias}`) ||
+    cmd.includes(`--filter=${alias}`) ||
+    cmd.includes(`/apps/${alias}/`) ||
+    cmd.includes(`/apps/${basename(app.dir)}/`) ||
+    cmd.includes(`${app.realDir}/`) ||
+    cmd.includes(`${app.dir}/`)
+  )
+}
+
+function commandPrefixPath(command) {
+  const m = String(command || '').match(/--prefix(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/)
+  return m ? (m[1] || m[2] || m[3]) : ''
+}
+
+async function apiLocalApps() {
+  const root = accxuiRoot()
+  if (!root) return { root: null, managed: false, apps: [], count: 0, message: 'Choose your accxui workspace folder in Setup to map localhost servers to app names.' }
+
+  let realRoot = root
+  try { realRoot = await realpath(root) } catch { /* keep root */ }
+  const catalog = await accxuiAppCatalog(realRoot)
+  const byExpectedPort = new Map(catalog.filter((a) => a.port).map((a) => [Number(a.port), a]))
+  const listening = await listeningTcpPorts()
+  const rows = []
+
+  await Promise.all(listening.map(async (proc) => {
+    if (proc.port === CONFIG.port || proc.port === CONFIG.ports.moqui || proc.port === CONFIG.ports.mysql || proc.port === CONFIG.ports.solr || proc.port === CONFIG.ports.elasticsearch) return
+    const [cwd, args] = await Promise.all([pidCwd(proc.pid), pidArgs(proc.pid)])
+    const prefix = commandPrefixPath(args)
+    let realPrefix = prefix
+    if (prefix) { try { realPrefix = await realpath(prefix) } catch { /* keep prefix */ } }
+
+    let app = byExpectedPort.get(proc.port)
+    if (!app) app = catalog.find((a) => cwd === a.realDir || cwd === a.dir || realPrefix === a.realDir || realPrefix === a.dir || commandHasApp(args, a))
+    if (!app) return
+
+    rows.push({
+      name: app.packageName || app.name,
+      label: app.name,
+      port: proc.port,
+      url: `http://localhost:${proc.port}`,
+      pid: proc.pid,
+      command: proc.command,
+      cwd,
+      appDir: app.realDir,
+      expectedPort: app.port || null,
+      portMatchesConfig: app.port ? Number(app.port) === proc.port : null,
+      source: byExpectedPort.get(proc.port) === app ? 'configured-port' : 'process-path',
+    })
+  }))
+
+  rows.sort((a, b) => a.port - b.port || a.name.localeCompare(b.name))
+  return { root: realRoot, managed: true, count: rows.length, apps: rows }
+}
+
 async function moquiWarPid() {
   const ps = await run('ps', ['-ax', '-o', 'pid=,command='])
   for (const line of ps.stdout.split('\n')) {
@@ -131,7 +287,7 @@ async function moquiWarPid() {
 }
 
 const pwaApp = (name) => CONFIG.pwaApps.find((a) => a.name === name)
-const pwaDir = (a) => (a.dir ? (a.dir.startsWith('/') ? a.dir : join(CWD, a.dir)) : null)
+const pwaDir = (a, root) => (a.dir ? (a.dir.startsWith('/') ? a.dir : join(root || CWD, a.dir)) : null)
 
 // ─── discovery: find the ACTIVE Moqui checkout ───────────────────────────────
 let _moquiHome = null
@@ -143,6 +299,9 @@ async function discover(force = false) {
     const r = await run('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn'])
     const n = r.stdout.split('\n').find((l) => l[0] === 'n')
     if (n) { try { home = await realpath(n.slice(1)) } catch { home = n.slice(1) } }
+  }
+  if (!home && SETTINGS.moquiHome && existsSync(SETTINGS.moquiHome)) { // the folder the dev picked
+    source = 'picked'; try { home = await realpath(SETTINGS.moquiHome) } catch { home = SETTINGS.moquiHome }
   }
   if (!home && CONFIG.moquiHome && existsSync(CONFIG.moquiHome)) {
     source = 'config'; try { home = await realpath(CONFIG.moquiHome) } catch { home = CONFIG.moquiHome }
@@ -351,13 +510,14 @@ async function apiDiagnose() {
 async function apiTopology() {
   const [pre, comps, exp] = await Promise.all([apiPreflight(), apiComponents(), apiExpectations().catch(() => null)])
 
+  const root = accxuiRoot()
   let pwaNodes
-  if (!HAS_PWA_WORKSPACE) {
-    pwaNodes = [{ id: 'pwa:none', label: 'PWA apps — not in this workspace', status: 'absent',
-      detail: 'Running standalone (Moqui-only mode), outside a PWA workspace. The Moqui stack below is fully managed; PWA start/stop needs an accxui-style workspace in your current directory.' }]
+  if (!root) {
+    pwaNodes = [{ id: 'pwa:none', label: 'PWA apps — folder not set', status: 'absent',
+      detail: 'Moqui-only mode. To manage the PWA dev servers, open Setup (⚙) and pick your accxui workspace folder.' }]
   } else {
     const pwaAll = await Promise.all(CONFIG.pwaApps.map(async (a) => {
-      const dir = pwaDir(a)
+      const dir = pwaDir(a, root)
       const installed = dir ? existsSync(dir) : true
       const o = installed ? await portOwner(a.port) : { listening: false }
       return {
@@ -473,16 +633,17 @@ async function restartMoqui() {
 }
 
 async function startPwa(name) {
-  if (!HAS_PWA_WORKSPACE) return { ok: false, message: 'PWA management needs an accxui-style workspace in your current directory (Moqui-only mode).' }
+  const root = accxuiRoot()
+  if (!root) return { ok: false, message: 'No PWA workspace set — pick your accxui folder in Setup (Moqui-only mode).' }
   const a = pwaApp(name); if (!a) return { ok: false, message: `Unknown app ${name}` }
-  const dir = pwaDir(a)
+  const dir = pwaDir(a, root)
   if (dir && !existsSync(dir)) return { ok: false, message: `${name} is not installed (${dir} missing). Clone it under apps/ first.` }
   const o = await portOwner(a.port)
   if (o.listening) return { ok: false, message: `${name} already running (pid ${o.pid} on :${a.port}).` }
-  const logDir = join(CWD, 'logs'); await mkdir(logDir, { recursive: true })
+  const logDir = join(root, 'logs'); await mkdir(logDir, { recursive: true })
   const out = openSync(join(logDir, `${name}.log`), 'a')
   const args = a.prefix ? ['--prefix', a.prefix, 'dev', '--port', String(a.port)] : ['--filter', a.filter || name, 'dev', '--port', String(a.port)]
-  const child = spawn('pnpm', args, { cwd: CWD, detached: true, stdio: ['ignore', out, out], env: { ...process.env, PATH: SANE_PATH } })
+  const child = spawn('pnpm', args, { cwd: root, detached: true, stdio: ['ignore', out, out], env: { ...process.env, PATH: SANE_PATH } })
   writeFileSync(join(logDir, `${name}.pid`), String(child.pid))
   child.unref()
   return { ok: true, message: `Started ${name} (pid ${child.pid}) on :${a.port}. Give Vite a few seconds; tail logs/${name}.log.` }
@@ -490,10 +651,11 @@ async function startPwa(name) {
 
 async function stopPwa(name) {
   const a = pwaApp(name); if (!a) return { ok: false, message: `Unknown app ${name}` }
+  const root = accxuiRoot() || CWD
   const killed = []
   const o = await portOwner(a.port)
   if (o.listening) { await run('kill', [o.pid]); killed.push(o.pid) }
-  try { const pid = (await readFile(join(CWD, 'logs', `${name}.pid`), 'utf8')).trim(); if (pid && !killed.includes(pid)) { await run('kill', [pid]); killed.push(pid) } } catch { /* no pid file */ }
+  try { const pid = (await readFile(join(root, 'logs', `${name}.pid`), 'utf8')).trim(); if (pid && !killed.includes(pid)) { await run('kill', [pid]); killed.push(pid) } } catch { /* no pid file */ }
   await delay(800)
   const after = await portOwner(a.port)
   return { ok: !after.listening, killed, message: after.listening ? `:${a.port} still held by pid ${after.pid}.` : `Stopped ${name} (killed ${killed.join(', ') || 'nothing'}).` }
@@ -519,6 +681,38 @@ async function apiAction(target, action) {
   return { ok: false, message: `Unknown target "${target}"` }
 }
 
+// ─── settings: the folders the dev picks (persisted; native macOS folder picker) ──
+function setPath(which, p) {
+  p = (p || '').trim(); if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
+  if (which === 'moqui') SETTINGS.moquiHome = p || undefined
+  else if (which === 'accxui') SETTINGS.accxuiHome = p || undefined
+  else return { ok: false, message: `Unknown setting "${which}"` }
+  const saved = saveSettings(); _moquiHome = null // bust discovery cache so the change applies now
+  return { ok: true, which, path: p, saved, settingsPath: SETTINGS_PATH }
+}
+
+async function pickFolder(which) {
+  const label = which === 'moqui' ? 'your Moqui project folder (e.g. notnaked or moqui-framework)'
+    : 'your accxui / PWA workspace folder'
+  if (process.platform !== 'darwin') return { ok: false, message: `Native picker is macOS-only — type the path for ${label} in Setup instead.` }
+  const r = await run('osascript', ['-e', `POSIX path of (choose folder with prompt "Select ${label}")`], 300000)
+  if (r.failed) {
+    const canceled = /cancel/i.test(r.stderr)
+    return { ok: false, canceled, message: canceled ? 'Cancelled.' : `Picker failed: ${(r.stderr || '').trim()}` }
+  }
+  return setPath(which, r.stdout)
+}
+
+async function apiSettings() {
+  const d = await discover(true)
+  const root = accxuiRoot()
+  return {
+    moquiHome: SETTINGS.moquiHome || '', accxuiHome: SETTINGS.accxuiHome || '',
+    resolvedMoquiHome: d.home || '', moquiSource: d.source, pwaManaged: !!root, accxuiResolved: root || '',
+    platform: process.platform, settingsPath: SETTINGS_PATH,
+  }
+}
+
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 const ROUTES = {
   '/api/discover': apiDiscover,
@@ -528,6 +722,7 @@ const ROUTES = {
   '/api/status': apiStatus,
   '/api/diagnose': apiDiagnose,
   '/api/topology': apiTopology,
+  '/api/local-apps': apiLocalApps,
 }
 
 const server = createServer(async (req, res) => {
@@ -541,12 +736,15 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       return res.end(html)
     }
-    if (req.method === 'POST' && path === '/api/action') {
+    if (req.method === 'POST') {
       let body = ''
       for await (const chunk of req) body += chunk
       let p = {}; try { p = JSON.parse(body || '{}') } catch { /* ignore */ }
-      return sendJson(await apiAction(p.target, p.action))
+      if (path === '/api/action') return sendJson(await apiAction(p.target, p.action))
+      if (path === '/api/pick-folder') return sendJson(await pickFolder(p.which))
+      if (path === '/api/settings') return sendJson(setPath(p.which, p.path))
     }
+    if (path === '/api/settings') return sendJson(await apiSettings())
     if (path === '/api/expectations') return sendJson(await apiExpectations(url.searchParams.get('set') || undefined))
     if (path === '/api/logs') return sendJson(await apiLogs(Math.min(parseInt(url.searchParams.get('kb') || '64', 10) || 64, 512)))
     if (ROUTES[path]) return sendJson(await ROUTES[path]())
@@ -560,10 +758,11 @@ const server = createServer(async (req, res) => {
 })
 
 server.listen(CONFIG.port, CONFIG.host, () => {
+  const root = accxuiRoot()
   console.log(`\n  moqui-console (hotwax/devkit)  →  http://${CONFIG.host}:${CONFIG.port}   (localhost only; Start/Stop/Restart enabled)`)
-  console.log(`  mode: ${HAS_PWA_WORKSPACE ? 'PWA workspace detected (PWA management on)' : 'Moqui-only (PWA management off)'}  ·  cwd: ${CWD}`)
+  console.log(`  mode: ${root ? 'PWA workspace ' + root : 'Moqui-only (pick your folders in Setup ⚙)'}`)
   discover(true).then((d) => {
     if (d.home) console.log(`  MOQUI_HOME = ${d.home}  (via ${d.source}${d.pid ? ', pid ' + d.pid : ''})\n`)
-    else console.log('  No Moqui checkout found — start Moqui, set $MOQUI_HOME, or run from inside the checkout.\n')
+    else console.log('  No Moqui found — open http://127.0.0.1:7070, click Setup ⚙, and pick your Moqui project folder.\n')
   })
 })
