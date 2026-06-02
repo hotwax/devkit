@@ -567,6 +567,31 @@
       border-color: #5c2b1c;
       color: #f0a58c;
     }
+
+    .app-summary {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 8px 0 10px;
+    }
+
+    .app-summary strong {
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .app-url {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    #setup .setup-row { display: flex; align-items: center; gap: 14px; padding: 11px 0; border-bottom: 1px solid #1e222b; }
+    #setup .setup-row:last-of-type { border-bottom: 0; }
+    #setup .setup-info { flex: 1; min-width: 0; }
+    #setup .setup-label { font-weight: 600; margin-bottom: 3px; }
+    #setup .setup-val { color: var(--accent); word-break: break-all; }
+    #setup button { flex: none; }
   </style>
 </head>
 
@@ -576,6 +601,7 @@
     <span class="badge">localhost</span>
     <span class="pill"><span id="liveDot" class="dot"></span><span id="liveTxt">checking…</span></span>
     <button id="refreshAll">↻ Refresh</button>
+    <button id="setupBtn" onclick="toggleSetup()">⚙ Setup</button>
     <span class="home" id="home">discovering…</span>
   </header>
 
@@ -584,6 +610,35 @@
       <button class="tab active" data-tab="arch" onclick="switchTab('arch')">System architecture</button>
       <button class="tab" data-tab="details" onclick="switchTab('details')">Details</button>
     </div>
+
+    <!-- ── SETUP ── -->
+    <section id="setup" class="card" style="display:none">
+      <h2>Setup <span class="muted">— point devkit at your folders; it remembers them</span></h2>
+      <div class="body">
+        <div class="setup-row">
+          <div class="setup-info">
+            <div class="setup-label">Moqui project folder</div>
+            <div class="setup-val mono" id="su-moqui">—</div>
+            <div class="muted" id="su-moqui-note"></div>
+          </div>
+          <button onclick="pickFolder('moqui')">Choose folder…</button>
+        </div>
+        <div class="setup-row">
+          <div class="setup-info">
+            <div class="setup-label">accxui / PWA workspace <span class="muted">(optional — for managing the apps)</span></div>
+            <div class="setup-val mono" id="su-accxui">—</div>
+            <div class="muted" id="su-accxui-note"></div>
+          </div>
+          <button onclick="pickFolder('accxui')">Choose folder…</button>
+        </div>
+        <p class="muted" id="su-status" style="margin:10px 0 0"></p>
+        <p class="muted" style="margin:6px 0 0">Stored in <span class="mono" id="su-path"></span>. On macOS the native folder dialog opens — watch for it.</p>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Running AccxUI apps <span class="muted" id="localAppsCount"></span></h2>
+        <div class="body" id="localApps"><span class="muted">checking localhost…</span></div>
+      </div>
+    </section>
 
     <!-- ── ARCHITECTURE ── -->
     <section id="view-architecture">
@@ -701,6 +756,29 @@
         for (const id in NODES) { const el = $('N-' + id); if (el) el.className = 'node ' + NODES[id].status }
         drawEdges()
       }
+    }
+
+    async function loadLocalApps() {
+      const data = await j('/api/local-apps')
+      const apps = data.apps || []
+      $('localAppsCount').textContent = data.managed ? `(${apps.length})` : ''
+      if (!data.managed) {
+        $('localApps').innerHTML = `<span class="muted">${esc(data.message || 'Choose your accxui folder in Setup.')}</span>`
+        return
+      }
+      if (!apps.length) {
+        $('localApps').innerHTML = `<div class="app-summary"><strong>0</strong><span class="muted">AccxUI localhost apps running</span></div>` +
+          `<div class="muted mono">${esc(data.root || '')}</div>`
+        return
+      }
+      const rows = apps.map((app) => `<tr>` +
+        `<td><b>${esc(app.name)}</b>${app.portMatchesConfig === false ? ' ' + tag('warn', 'unexpected port') : ''}</td>` +
+        `<td><a class="app-url" href="${esc(app.url)}" target="_blank" rel="noopener">${esc(app.url)}</a></td>` +
+        `<td class="mono">pid ${esc(app.pid)}</td>` +
+        `<td class="mono muted">${esc(app.cwd || app.appDir || '')}</td>` +
+        `</tr>`).join('')
+      $('localApps').innerHTML = `<div class="app-summary"><strong>${apps.length}</strong><span>AccxUI localhost app${apps.length === 1 ? '' : 's'} running</span><span class="muted mono">${esc(data.root || '')}</span></div>` +
+        `<table><thead><tr><th>app</th><th>url</th><th>process</th><th>serving folder</th></tr></thead><tbody>${rows}</tbody></table>`
     }
 
     function drawEdges() {
@@ -828,12 +906,12 @@
       document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name))
       $('view-architecture').style.display = name === 'arch' ? '' : 'none'
       $('view-details').style.display = name === 'details' ? '' : 'none'
-      if (name === 'arch') { if (!loaded.arch) { loadTopology(); loaded.arch = true } else requestAnimationFrame(drawEdges) }
+      if (name === 'arch') { if (!loaded.arch) { loadTopology(); loadLocalApps(); loaded.arch = true } else { loadLocalApps(); requestAnimationFrame(drawEdges) } }
       if (name === 'details' && !loaded.details) { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs(); loaded.details = true }
     }
     function refreshActive() {
       loadStatus()
-      if (activeTab() === 'arch') loadTopology()
+      if (activeTab() === 'arch') { loadTopology(); loadLocalApps() }
       else { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs() }
     }
 
@@ -846,10 +924,34 @@
     let rt = null
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawEdges, 120) })
 
+    // ── setup / folder picker ──
+    async function loadSettings() {
+      const s = await j('/api/settings')
+      $('su-moqui').textContent = s.resolvedMoquiHome || s.moquiHome || 'not set'
+      $('su-moqui-note').textContent = s.resolvedMoquiHome
+        ? (s.moquiHome ? `pinned · in use (source: ${s.moquiSource})` : `auto-detected (source: ${s.moquiSource}) — choose to pin it`)
+        : 'not found — choose your Moqui project folder (e.g. notnaked)'
+      $('su-accxui').textContent = s.accxuiResolved || s.accxuiHome || 'not set'
+      $('su-accxui-note').textContent = s.pwaManaged ? 'PWA management on' : 'Moqui-only — choose your accxui folder to manage the PWA dev servers'
+      $('su-path').textContent = s.settingsPath
+      if (s.platform !== 'darwin') $('su-status').textContent = 'Native picker is macOS-only on this build; set paths via env or devkit.config.json.'
+      return s
+    }
+    function toggleSetup() { const el = $('setup'); const show = el.style.display === 'none'; el.style.display = show ? '' : 'none'; if (show) loadSettings() }
+    async function pickFolder(which) {
+      $('su-status').textContent = 'Opening the macOS folder picker… (look for the dialog)'
+      try {
+        const r = await fetch('/api/pick-folder', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which }) }).then((x) => x.json())
+        $('su-status').textContent = r.ok ? `Set ${which} → ${r.path}` : (r.message || 'Cancelled.')
+        if (r.ok) { await loadSettings(); loadStatus(); loadTopology(); loadLocalApps() }
+      } catch (e) { $('su-status').textContent = 'picker error: ' + e }
+    }
+
     // init
-    loadStatus(); loadTopology(); loaded.arch = true
+    loadStatus(); loadTopology(); loadLocalApps(); loaded.arch = true
+    loadSettings().then((s) => { if (!s.resolvedMoquiHome) $('setup').style.display = '' }) // first-run: open Setup if no Moqui found
     setInterval(loadStatus, 5000)
-    setInterval(() => { if (activeTab() === 'arch') loadTopology() }, 10000)
+    setInterval(() => { if (activeTab() === 'arch') { loadTopology(); loadLocalApps() } }, 10000)
   </script>
 </body>
 
