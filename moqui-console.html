@@ -588,9 +588,6 @@
 
     #setup .setup-row { display: flex; align-items: center; gap: 14px; padding: 11px 0; border-bottom: 1px solid #1e222b; }
     #setup .setup-row:last-of-type { border-bottom: 0; }
-    #setup .setup-manual { display: flex; gap: 6px; margin-top: 7px; }
-    #setup .setup-manual input { flex: 1; min-width: 0; background: #0c0e12; color: var(--txt); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font: 12px var(--mono); }
-    #setup .setup-manual button { flex: none; padding: 5px 12px; }
     #setup .setup-info { flex: 1; min-width: 0; }
     #setup .setup-label { font-weight: 600; margin-bottom: 3px; }
     #setup .setup-val { color: var(--accent); word-break: break-all; }
@@ -630,13 +627,9 @@
       <div class="body">
         <div class="setup-row">
           <div class="setup-info">
-            <div class="setup-label">Moqui project folder <span class="muted">(the moqui-framework checkout)</span></div>
+            <div class="setup-label">Moqui framework folder <span class="muted">— the project root with gradlew + runtime/ (not moqui-runtime)</span></div>
             <div class="setup-val mono" id="su-moqui">—</div>
             <div class="muted" id="su-moqui-note"></div>
-            <div class="setup-manual">
-              <input id="su-moqui-input" type="text" spellcheck="false" placeholder="/path/to/moqui-framework" />
-              <button onclick="saveManual('moqui')">Save</button>
-            </div>
           </div>
           <button onclick="pickFolder('moqui')">Choose folder…</button>
         </div>
@@ -645,15 +638,11 @@
             <div class="setup-label">accxui / PWA workspace <span class="muted">(optional — for managing the apps)</span></div>
             <div class="setup-val mono" id="su-accxui">—</div>
             <div class="muted" id="su-accxui-note"></div>
-            <div class="setup-manual">
-              <input id="su-accxui-input" type="text" spellcheck="false" placeholder="/path/to/accxui" />
-              <button onclick="saveManual('accxui')">Save</button>
-            </div>
           </div>
           <button onclick="pickFolder('accxui')">Choose folder…</button>
         </div>
         <p class="muted" id="su-status" style="margin:10px 0 0"></p>
-        <p class="muted" style="margin:6px 0 0">Stored in <span class="mono" id="su-path"></span>. The macOS dialog opens via “Choose folder…”; if it doesn’t appear, type the path above and hit Save.</p>
+        <p class="muted" style="margin:6px 0 0">Stored in <span class="mono" id="su-path"></span>. On macOS the native folder dialog opens — watch for it.</p>
       </div>
       <div class="card" style="margin-top:16px">
         <h2>Running AccxUI apps <span class="muted" id="localAppsCount"></span></h2>
@@ -981,7 +970,6 @@
     async function loadSettings() {
       const s = await j('/api/settings')
       $('su-moqui').textContent = s.resolvedMoquiHome || s.moquiHome || 'not set'
-      $('su-moqui-input').value = s.moquiHome || ''
       let note
       if (!s.resolvedMoquiHome) note = '⚠ not found — choose or type your moqui-framework folder'
       else if (s.moquiAdjusted) note = `⚠ saved folder "${s.moquiRaw}" isn't a framework checkout — using ${s.resolvedMoquiHome} instead (set it explicitly below)`
@@ -989,28 +977,19 @@
       else note = s.moquiHome ? `pinned · in use (source: ${s.moquiSource})` : `auto-detected (source: ${s.moquiSource}) — set it to pin`
       $('su-moqui-note').textContent = note
       $('su-accxui').textContent = s.accxuiResolved || s.accxuiHome || 'not set'
-      $('su-accxui-input').value = s.accxuiHome || ''
-      $('su-accxui-note').textContent = s.pwaManaged ? 'PWA management on' : 'Moqui-only — set your accxui folder to manage the PWA dev servers'
+      $('su-accxui-note').textContent = s.pwaManaged ? 'PWA management on' : 'Moqui-only — choose your accxui folder to manage the PWA dev servers'
       $('su-path').textContent = s.settingsPath
       if (s.platform !== 'darwin') $('su-status').textContent = 'Native picker is macOS-only; type the path above and Save.'
       return s
     }
     function toggleSetup() { const el = $('setup'); const show = el.style.display === 'none'; el.style.display = show ? '' : 'none'; if (show) loadSettings() }
-    async function applySetting(which, body, busyMsg) {
-      $('su-status').textContent = busyMsg
+    async function pickFolder(which) {
+      $('su-status').textContent = 'Opening the macOS folder picker… (look for the dialog)'
       try {
-        const r = await fetch('/api/' + (body.path !== undefined ? 'settings' : 'pick-folder'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((x) => x.json())
+        const r = await fetch('/api/pick-folder', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which }) }).then((x) => x.json())
         $('su-status').textContent = r.ok ? `Set ${which} → ${r.path}` : (r.message || 'Cancelled.')
         if (r.ok) { await loadSettings(); loadStatus(); loadTopology(); loadLocalApps(); if (loaded.guide) loadGuide() }
-      } catch (e) { $('su-status').textContent = 'error: ' + e }
-    }
-    function saveManual(which) {
-      const path = $('su-' + which + '-input').value.trim()
-      if (!path) { $('su-status').textContent = 'Enter a path first.'; return }
-      applySetting(which, { which, path }, 'Saving…')
-    }
-    async function pickFolder(which) {
-      await applySetting(which, { which }, 'Opening the macOS folder picker… (look for the dialog)')
+      } catch (e) { $('su-status').textContent = 'picker error: ' + e }
     }
 
     // init

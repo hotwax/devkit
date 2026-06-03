@@ -711,9 +711,9 @@ function setPath(which, p) {
 }
 
 async function pickFolder(which) {
-  const label = which === 'moqui' ? 'your Moqui project folder (e.g. notnaked or moqui-framework)'
-    : 'your accxui / PWA workspace folder'
-  if (process.platform !== 'darwin') return { ok: false, message: `Native picker is macOS-only — type the path for ${label} in Setup instead.` }
+  const label = which === 'moqui' ? 'your moqui-framework folder (the project root with gradlew and runtime, NOT moqui-runtime)'
+    : 'your accxui / PWA workspace folder (the repo with apps/)'
+  if (process.platform !== 'darwin') return { ok: false, message: `Native picker is macOS-only on this build (${label}).` }
   const r = await run('osascript', ['-e', `POSIX path of (choose folder with prompt "Select ${label}")`], 300000)
   if (r.failed) {
     const canceled = /cancel/i.test(r.stderr)
