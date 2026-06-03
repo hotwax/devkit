@@ -318,8 +318,26 @@ async function discover(force = false) {
       if (m) { try { home = await realpath(m[1]) } catch { home = m[1] } }
     } catch { /* ignore */ }
   }
-  _moquiHome = { pid, home, source }
+  // Validate + self-heal: if the chosen path isn't a framework checkout, try to recover the real one
+  // (e.g. the dev picked moqui-runtime or a subdir — use the sibling/ancestor moqui-framework).
+  let valid = false, rawHome = home, adjusted = false
+  if (home) {
+    const resolved = resolveMoquiHome(home)
+    if (resolved !== home) { adjusted = true; try { home = await realpath(resolved) } catch { home = resolved } }
+    valid = looksLikeMoquiHome(home)
+  }
+  _moquiHome = { pid, home, source, valid, rawHome, adjusted }
   return _moquiHome
+}
+
+// Map a user-picked path to the real Moqui framework home, recovering common mistakes.
+function resolveMoquiHome(picked) {
+  if (!picked || looksLikeMoquiHome(picked)) return picked
+  const up = walkUpForMoqui(picked)                 // they picked a subdir of the framework
+  if (up) return up
+  const sib = join(dirname(picked), 'moqui-framework') // they picked moqui-runtime (sibling of the framework)
+  if (existsSync(sib) && looksLikeMoquiHome(sib)) return sib
+  return picked                                      // give up — keep it, but discover() marks valid:false
 }
 
 // ─── read endpoints ───────────────────────────────────────────────────────────
@@ -382,7 +400,8 @@ async function apiConfig() {
 
 async function apiComponents() {
   const d = await discover()
-  if (!d.home) return { error: 'Moqui checkout not found' }
+  if (!d.home) return { error: 'No Moqui folder set. Open Setup (⚙) and pick your moqui-framework folder.' }
+  if (!d.valid) return { error: `"${d.home}" is not a moqui-framework checkout (no runtime/component). In Setup (⚙), pick the moqui-framework folder.` }
   const dir = join(d.home, 'runtime', 'component')
   let names
   try { names = await readdir(dir) } catch (e) { return { error: `cannot read ${dir}: ${e.code}` } }
@@ -590,7 +609,7 @@ async function apiTopology() {
 
 async function apiStatus() {
   const [d, moqui, live] = await Promise.all([discover(), portOwner(CONFIG.ports.moqui), probe(CONFIG.moquiLiveness, 3000)])
-  return { moquiHome: d.home, pid: d.pid, source: d.source, moquiLive: live.ok && live.status === 200, port8080: moqui.listening }
+  return { moquiHome: d.home, pid: d.pid, source: d.source, valid: d.valid, adjusted: d.adjusted, rawHome: d.rawHome, moquiLive: live.ok && live.status === 200, port8080: moqui.listening }
 }
 
 // ─── write endpoints: guarded lifecycle (localhost only) ──────────────────────
@@ -708,7 +727,8 @@ async function apiSettings() {
   const root = accxuiRoot()
   return {
     moquiHome: SETTINGS.moquiHome || '', accxuiHome: SETTINGS.accxuiHome || '',
-    resolvedMoquiHome: d.home || '', moquiSource: d.source, pwaManaged: !!root, accxuiResolved: root || '',
+    resolvedMoquiHome: d.home || '', moquiSource: d.source, moquiValid: d.valid, moquiAdjusted: d.adjusted, moquiRaw: d.rawHome || '',
+    pwaManaged: !!root, accxuiResolved: root || '',
     platform: process.platform, settingsPath: SETTINGS_PATH,
   }
 }
