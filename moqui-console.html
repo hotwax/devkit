@@ -296,6 +296,33 @@
       margin-top: 3px;
     }
 
+    .unblock {
+      margin-top: 10px;
+      padding: 11px 14px;
+      border-radius: 9px;
+      border: 1px solid #3a2c0e;
+      background: #171309;
+    }
+
+    .unblock .title {
+      font-weight: 650;
+      margin-bottom: 6px;
+    }
+
+    .unblock ul {
+      margin: 6px 0 8px 18px;
+      padding: 0;
+    }
+
+    .unblock li {
+      margin: 3px 0;
+    }
+
+    .unblock code {
+      font-family: var(--mono);
+      color: var(--accent);
+    }
+
     .cmd {
       display: flex;
       align-items: center;
@@ -601,6 +628,10 @@
     #view-guide .gs-detail { margin-top: 3px; }
     #view-guide .gs-actions { margin-top: 8px; }
     #view-guide .cmd code { white-space: pre-wrap; }
+    .readiness-list { margin-top: 10px; }
+    .readiness-item { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-top: 1px solid #1e222b; }
+    .readiness-item:first-child { border-top: 0; }
+    .readiness-main { flex: 1; min-width: 0; }
   </style>
 </head>
 
@@ -646,14 +677,96 @@
       </div>
       <div class="card" style="margin-top:16px">
         <h2>Running AccxUI apps <span class="muted" id="localAppsCount"></span></h2>
-        <div class="body" id="localApps"><span class="muted">checking localhost…</span></div>
+        <div class="body">
+          <div class="controls">
+            <button id="pwaBackendConfigBtn" onclick="writePwaBackendConfig()">Write config + restart PWAs</button>
+            <span class="muted" id="pwaBackendConfigStatus"></span>
+          </div>
+          <div id="localApps"><span class="muted">checking localhost…</span></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Source checkouts <span class="muted" id="sourceStateCount"></span></h2>
+        <div class="body">
+          <div class="controls">
+            <button id="installCltBtn" onclick="installCommandLineTools()">Install Apple CLT</button>
+            <button id="checkCltBtn" onclick="checkCommandLineTools()">Check CLT status</button>
+            <button id="upgradeArchivesBtn" onclick="upgradeArchives()">Upgrade archives to git clones</button>
+            <button id="upgradeArchivesTokenBtn" onclick="upgradeArchivesWithToken()">Upgrade with GitHub token</button>
+            <span class="muted" id="upgradeArchivesStatus"></span>
+          </div>
+          <div id="cltStatus" style="display:none; margin:8px 0"></div>
+          <div id="sourceState"><span class="muted">checking local folders…</span></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Toolchains <span class="muted" id="toolchainsCount"></span></h2>
+        <div class="body" id="toolchains"><span class="muted">checking local toolchains…</span></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>NotNaked repo access <span class="muted" id="notnakedAccessCount"></span></h2>
+        <div class="body">
+          <div class="controls">
+            <button id="notnakedTokenCheckBtn" onclick="checkNotNakedAccessWithToken()">Check with GitHub token</button>
+            <button id="githubTokenDiagnosticsBtn" onclick="diagnoseGithubToken()">Diagnose token</button>
+            <button id="notnakedDiscoverBtn" onclick="discoverNotNakedRepos()">Discover with token</button>
+            <button id="importLocalRepoBtn" onclick="importLocalRepoPath()">Import local path</button>
+            <button id="importLocalRootBtn" onclick="importLocalRepoRoot()">Import local folder</button>
+            <button id="importLocalRootPrepareBtn" onclick="importLocalRepoRoot(true)">Import folder + prepare</button>
+            <button id="privateBundleRequestBtn" onclick="writePrivateBundleRequest()">Write bundle request</button>
+            <button id="targetTemplateBtn" onclick="writeTargetTemplate()">Write target override template</button>
+            <button id="targetEditBtn" onclick="openTargetEditor()">Edit target</button>
+            <span class="muted" id="notnakedTokenStatus"></span>
+          </div>
+          <div id="notnakedAccess"><span class="muted">checking GitHub access…</span></div>
+          <div id="githubTokenDiagnostics" style="display:none; margin-top:12px"></div>
+          <div id="notnakedDiscoverResults" style="display:none; margin-top:12px"></div>
+          <div id="targetEditor" style="display:none; margin-top:12px">
+            <textarea id="targetEditorText" spellcheck="false" style="width:100%; min-height:360px; box-sizing:border-box; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.45; color:var(--fg); background:#080a0f; border:1px solid #222838; border-radius:8px; padding:10px"></textarea>
+            <div class="controls" style="margin-top:8px">
+              <button id="targetSaveBtn" onclick="saveTargetEditor()">Save target override</button>
+              <button onclick="closeTargetEditor()">Close</button>
+              <span class="muted" id="targetEditorStatus"></span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
     <!-- ── GET STARTED ── -->
     <section id="view-guide" style="display:none">
+      <div class="card" style="margin-bottom:16px">
+        <h2>Objective audit <span class="muted" id="objectiveAuditCount"></span></h2>
+        <div class="body" id="objectiveAudit"><span class="muted">checking requested end state…</span></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <h2>NotNaked readiness <span class="muted" id="readinessCount"></span></h2>
+        <div class="body">
+          <div class="controls">
+            <button id="unblockReportBtn" onclick="loadUnblockReport()">Generate unblock report</button>
+            <button id="stateSnapshotBtn" onclick="writeStateSnapshot()">Write state snapshot</button>
+            <button id="launcherBtn" onclick="writeDevKitLauncher()">Write launcher</button>
+            <span class="muted" id="unblockReportStatus"></span>
+          </div>
+          <div id="readiness"><span class="muted">checking readiness…</span></div>
+          <pre class="log" id="unblockReport" style="display:none; margin-top:12px"></pre>
+        </div>
+      </div>
       <div class="card">
         <h2>Get started <span class="muted">— 0 → ready to dev · standard setup</span></h2>
+        <div class="body">
+          <button id="continueSetupBtn" onclick="continueSetup()">Continue setup</button>
+          <button id="prepareBtn" onclick="prepareLocalStack()">Prepare local stack</button>
+          <button id="resolveTokenBtn" onclick="resolveNotNakedWithToken()">Resolve with GitHub token</button>
+          <button id="prepareTokenBtn" onclick="prepareLocalStackWithToken()">Prepare with GitHub token</button>
+          <button id="bootstrapBtn" onclick="runBootstrap()">Bootstrap workspace</button>
+          <button id="bootstrapTokenBtn" onclick="runBootstrapWithToken()">Bootstrap with GitHub token</button>
+          <button id="guideInstallCltBtn" onclick="installCommandLineTools('guideInstallCltBtn', 'bootstrapStatus', true)">Install Apple CLT</button>
+          <button id="guideUpgradeArchivesTokenBtn" onclick="upgradeArchivesWithToken()">Upgrade archives with token</button>
+          <button id="devkitSelfCheckBtn" onclick="runDevkitSelfCheck()">Run DevKit self-check</button>
+          <span class="muted" id="bootstrapStatus">Fetches public HotWax/Moqui sources and wires the standard local folders.</span>
+          <div id="prepareResult" class="muted" style="margin-top:10px"></div>
+        </div>
         <div class="body" id="guide"><span class="muted">checking your machine…</span></div>
       </div>
     </section>
@@ -740,6 +853,25 @@
       return `<div class="cmd"><code>${esc(cmd)}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent);this.textContent='copied'">copy</button></div>`
     }
 
+    function renderPrivateBundleUnblock(bundle) {
+      if (!bundle?.bundleRequest?.length) return ''
+      const repos = bundle.bundleRequest.map((repo) =>
+        `<li><code>${esc(repo.repo)}</code> <span class="muted">→ ${esc(repo.targetPath)}</span></li>`
+      ).join('')
+      const archiveNames = bundle.bundleRequest
+        .map((repo) => repo.acceptableArchiveNames?.[0])
+        .filter(Boolean)
+        .join(', ')
+      return `<div class="unblock">` +
+        `<div class="title">${tag('warn', 'needs access')} Private NotNaked repos are the current gate</div>` +
+        `<div class="muted">Fastest path: paste a one-time GitHub token into <b>Resolve with GitHub token</b>. Offline path: put repo folders or archives in one folder, then use <b>Import folder + prepare</b>.</div>` +
+        `<ul>${repos}</ul>` +
+        `<div class="muted">Accepted archive examples: <span class="mono">${esc(archiveNames || 'repo-name.zip')}</span></div>` +
+        (bundle.markdownPath ? `<div class="mono muted" style="margin-top:6px">${esc(bundle.markdownPath)}</div>` : '') +
+        (bundle.scriptPath ? `<div class="mono muted">${esc(bundle.scriptPath)}</div>` : '') +
+        `</div>`
+    }
+
     // ── header status (always polling) ──
     async function loadStatus() {
       try {
@@ -777,7 +909,7 @@
     }
 
     async function loadLocalApps() {
-      const data = await j('/api/local-apps')
+      const [data, healthData, backendData] = await Promise.all([j('/api/local-apps'), j('/api/pwa-health'), j('/api/pwa-backend-config')])
       const apps = data.apps || []
       $('localAppsCount').textContent = data.managed ? `(${apps.length})` : ''
       if (!data.managed) {
@@ -795,8 +927,49 @@
         `<td class="mono">pid ${esc(app.pid)}</td>` +
         `<td class="mono muted">${esc(app.cwd || app.appDir || '')}</td>` +
         `</tr>`).join('')
+      const healthRows = (healthData.health || []).map((app) => `<tr>` +
+        `<td>${app.ok ? tag('ok', 'loads') : tag('warn', 'check')}</td>` +
+        `<td><b>${esc(app.name)}</b></td>` +
+        `<td class="mono">${esc(app.title || app.detail || '')}</td>` +
+        `<td class="mono muted">${esc(app.url || '')}</td>` +
+        `</tr>`).join('')
+      const healthTable = healthRows
+        ? `<table><thead><tr><th>page</th><th>app</th><th>title / status</th><th>url</th></tr></thead><tbody>${healthRows}</tbody></table>`
+        : ''
+      const backendRows = (backendData.rows || []).map((app) => `<tr>` +
+        `<td>${app.ok ? tag('ok', 'local') : tag('warn', 'env')}</td>` +
+        `<td><b>${esc(app.name)}</b></td>` +
+        `<td class="mono">${esc(app.detail || '')}</td>` +
+        `<td class="mono muted">${esc(app.envPath || '')}</td>` +
+        `</tr>`).join('')
+      const backendTable = backendRows
+        ? `<table><thead><tr><th>backend</th><th>app</th><th>config</th><th>env file</th></tr></thead><tbody>${backendRows}</tbody></table>`
+        : ''
       $('localApps').innerHTML = `<div class="app-summary"><strong>${apps.length}</strong><span>AccxUI localhost app${apps.length === 1 ? '' : 's'} running</span><span class="muted mono">${esc(data.root || '')}</span></div>` +
-        `<table><thead><tr><th>app</th><th>url</th><th>process</th><th>serving folder</th></tr></thead><tbody>${rows}</tbody></table>`
+        `<table><thead><tr><th>app</th><th>url</th><th>process</th><th>serving folder</th></tr></thead><tbody>${rows}</tbody></table>` +
+        healthTable +
+        backendTable
+    }
+
+    async function writePwaBackendConfig() {
+      const btn = $('pwaBackendConfigBtn')
+      btn.disabled = true
+      $('pwaBackendConfigStatus').textContent = 'writing local backend env files…'
+      try {
+        const r = await fetch('/api/pwa-backend-config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { restartPwas: true } })
+        }).then((x) => x.json())
+        $('pwaBackendConfigStatus').textContent = r.message || (r.ok ? 'backend config ready' : 'backend config incomplete')
+        await loadLocalApps()
+        await loadReadiness()
+        await loadObjectiveAudit()
+      } catch (e) {
+        $('pwaBackendConfigStatus').textContent = `backend config failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
     }
 
     function drawEdges() {
@@ -834,15 +1007,37 @@
       box.innerHTML = html
     }
 
+    function renderActionResult(box, r, action, label) {
+      box.innerHTML = `<div>${tag(r.ok ? 'ok' : 'err', r.ok ? 'done' : 'failed')} <b>${esc(label)}</b> · ${esc(action)}</div>` +
+        `<div class="nd-detail">${esc(r.message || '')}</div>` +
+        (r.killed && r.killed.length ? `<div class="muted">killed pid: ${r.killed.map((k) => esc(k.pid || k)).join(', ')}</div>` : '')
+    }
+
+    async function postAction(target, action, options) {
+      return fetch('/api/action', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ target, action, options: options || {} })
+      }).then((x) => x.json())
+    }
+
     async function doAction(target, action, label) {
       if ((action === 'stop' || action === 'restart') && !confirm(`${action} ${label}? This kills the local process.`)) return
       const box = $('node-detail')
       box.innerHTML = `<div class="muted">${esc(action)}ing ${esc(label)}…</div>`
       try {
-        const r = await fetch('/api/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target, action }) }).then((x) => x.json())
-        box.innerHTML = `<div>${tag(r.ok ? 'ok' : 'err', r.ok ? 'done' : 'failed')} <b>${esc(label)}</b> · ${esc(action)}</div>` +
-          `<div class="nd-detail">${esc(r.message || '')}</div>` +
-          (r.killed && r.killed.length ? `<div class="muted">killed pid: ${r.killed.map((k) => esc(k.pid || k)).join(', ')}</div>` : '')
+        let r = await postAction(target, action)
+        if (r.requiresOverride) {
+          const missing = (r.missingNotNaked || []).join(', ')
+          const ok = confirm(`${r.message}\n\nMissing: ${missing || 'NotNaked private repos'}\n\nStart the public fallback anyway for debugging?`)
+          if (!ok) {
+            renderActionResult(box, r, action, label)
+            return
+          }
+          box.innerHTML = `<div class="muted">${esc(action)}ing ${esc(label)} with public fallback override…</div>`
+          r = await postAction(target, action, { forcePublicBaseline: true })
+        }
+        renderActionResult(box, r, action, label)
       } catch (e) { box.innerHTML = `<div class="nd-detail">action error: ${esc(e)}</div>` }
       loadStatus(); setTimeout(loadTopology, 1500)
     }
@@ -925,13 +1120,13 @@
       $('view-guide').style.display = name === 'guide' ? '' : 'none'
       $('view-architecture').style.display = name === 'arch' ? '' : 'none'
       $('view-details').style.display = name === 'details' ? '' : 'none'
-      if (name === 'guide') { loadGuide(); loaded.guide = true }
+      if (name === 'guide') { loadObjectiveAudit(); loadReadiness(); loadGuide(); loaded.guide = true }
       if (name === 'arch') { if (!loaded.arch) { loadTopology(); loadLocalApps(); loaded.arch = true } else { loadLocalApps(); requestAnimationFrame(drawEdges) } }
       if (name === 'details' && !loaded.details) { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs(); loaded.details = true }
     }
     function refreshActive() {
       loadStatus()
-      if (activeTab() === 'guide') loadGuide()
+      if (activeTab() === 'guide') { loadObjectiveAudit(); loadReadiness(); loadGuide() }
       else if (activeTab() === 'arch') { loadTopology(); loadLocalApps() }
       else { loadDiagnose(); loadPreflight(); loadConfig(); loadComponents(); loadExpectations(); loadLogs() }
     }
@@ -957,6 +1152,343 @@
       $('guide').innerHTML = html
     }
 
+    async function loadObjectiveAudit() {
+      const el = $('objectiveAudit')
+      if (!el) return
+      const r = await j('/api/objective-audit')
+      if (r.error) { el.innerHTML = `${tag('err', 'error')} ${esc(r.error)}`; return }
+      $('objectiveAuditCount').textContent = r.ready ? 'complete' : `${r.summary.passed}/${r.summary.total} proven`
+      const rows = (r.checks || []).map((x) =>
+        `<div class="readiness-item">` +
+        `<div>${tag(x.ok ? 'ok' : 'warn', x.ok ? 'proven' : 'open')}</div>` +
+        `<div class="readiness-main"><b>${esc(x.title)}</b><div class="muted">${esc(x.evidence || '')}</div></div>` +
+        `</div>`).join('')
+      el.innerHTML = `<p class="muted">${r.ready ? 'Every requirement in the original local NotNaked objective is verified.' : 'This maps the original request to current local evidence.'}</p>` +
+        `<div class="readiness-list">${rows}</div>`
+    }
+
+    async function loadReadiness() {
+      const el = $('readiness')
+      if (!el) return
+      const r = await j('/api/notnaked/readiness')
+      if (r.error) { el.innerHTML = `${tag('err', 'error')} ${esc(r.error)}`; return }
+      $('readinessCount').textContent = r.ready ? 'ready' : `${r.summary.passed}/${r.summary.total} passed`
+      const rows = (r.checks || []).map((x) =>
+        `<div class="readiness-item">` +
+        `<div>${tag(x.ok ? 'ok' : 'warn', x.ok ? 'pass' : 'todo')}</div>` +
+        `<div class="readiness-main"><b>${esc(x.title)}</b><div class="muted">${esc(x.detail || '')}</div></div>` +
+        `</div>`).join('')
+      el.innerHTML = `<p class="muted">${r.ready ? 'The local NotNaked dev target is ready.' : 'This is the exact remaining gate for the requested NotNaked dev target.'}</p>` +
+        `<div class="readiness-list">${rows}</div>`
+    }
+
+    async function loadUnblockReport() {
+      const btn = $('unblockReportBtn')
+      const status = $('unblockReportStatus')
+      const out = $('unblockReport')
+      btn.disabled = true
+      status.textContent = 'generating report…'
+      try {
+        const r = await j('/api/unblock-report')
+        out.style.display = ''
+        out.textContent = r.report || r.message || 'No report output.'
+        status.innerHTML = `${r.ok ? tag('ok', 'ready') : tag('warn', 'blocked')} <button onclick="navigator.clipboard.writeText($('unblockReport').textContent)">copy report</button>`
+      } catch (e) {
+        status.textContent = `report failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function writeStateSnapshot() {
+      const btn = $('stateSnapshotBtn')
+      const status = $('unblockReportStatus')
+      btn.disabled = true
+      status.textContent = 'writing state snapshot…'
+      try {
+        const r = await fetch('/api/state-snapshot', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((x) => x.json())
+        status.textContent = r.ok ? `${r.message} · ${r.summary?.passed || 0}/${r.summary?.total || 0} proven` : (r.message || 'snapshot failed')
+      } catch (e) {
+        status.textContent = `snapshot failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function writeDevKitLauncher() {
+      const btn = $('launcherBtn')
+      const status = $('unblockReportStatus')
+      btn.disabled = true
+      status.textContent = 'writing DevKit launcher…'
+      try {
+        const r = await fetch('/api/devkit/launcher', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((x) => x.json())
+        status.textContent = r.ok ? r.message : (r.message || 'launcher failed')
+      } catch (e) {
+        status.textContent = `launcher failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function runBootstrap(options = {}) {
+      const btn = $('bootstrapBtn')
+      const tokenBtn = $('bootstrapTokenBtn')
+      const status = $('bootstrapStatus')
+      btn.disabled = true
+      if (tokenBtn) tokenBtn.disabled = true
+      status.textContent = options.githubToken ? 'bootstrapping with one-time GitHub token…' : 'bootstrapping…'
+      try {
+        const r = await fetch('/api/setup/bootstrap', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options })
+        }).then((x) => x.json())
+        status.textContent = r.ok ? `done · ${r.workspace}` : `failed · ${r.message || 'see terminal'}`
+        await loadObjectiveAudit()
+        await loadGuide()
+        await loadReadiness()
+        await loadSettings()
+        await loadSourceState()
+        await loadToolchains()
+      } catch (e) {
+        status.textContent = `failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+        if (tokenBtn) tokenBtn.disabled = false
+      }
+    }
+
+    function runBootstrapWithToken() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax NotNaked repos. It is not saved.')
+      if (!githubToken) return
+      runBootstrap({ githubToken })
+    }
+
+    async function refreshAfterSetupAction() {
+      await loadObjectiveAudit()
+      await loadGuide()
+      await loadReadiness()
+      await loadSettings()
+      await loadSourceState()
+      await loadToolchains()
+      await loadStatus()
+      await loadTopology()
+      await loadLocalApps()
+    }
+
+    function renderPrepareResult(result) {
+      const rows = (result.steps || []).map((s) => {
+        const state = s.ok ? tag('ok', s.skipped ? 'ok' : 'done') : (s.skipped ? tag('warn', 'skipped') : tag('err', 'failed'))
+        return `<div>${state} <b>${esc(s.target)}</b> <span class="muted">${esc(s.message || '')}</span></div>`
+      }).join('')
+      $('prepareResult').innerHTML = `<div>${tag(result.ready ? 'ok' : 'warn', result.ready ? 'ready' : 'not ready')} ` +
+        `<b>NotNaked readiness:</b> ${esc(result.readiness?.summary?.passed || 0)}/${esc(result.readiness?.summary?.total || 0)} passed</div>` + rows
+    }
+
+    async function continueSetup(options = {}) {
+      const btn = $('continueSetupBtn')
+      btn.disabled = true
+      $('bootstrapStatus').textContent = 'choosing the next safe setup step…'
+      $('prepareResult').innerHTML = '<span class="muted">checking current readiness…</span>'
+      try {
+        const r = await fetch('/api/setup/continue', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options })
+        }).then((x) => x.json())
+        $('bootstrapStatus').textContent = r.message || (r.ok ? 'continue step complete' : 'continue step failed')
+        if (r.prepare) renderPrepareResult(r.prepare)
+        else {
+          $('prepareResult').innerHTML = `<div>${tag(r.ready ? 'ok' : 'warn', r.ready ? 'ready' : r.action || 'blocked')} <b>${esc(r.message || '')}</b></div>` +
+            renderPrivateBundleUnblock(r.bundle)
+        }
+        await refreshAfterSetupAction()
+      } catch (e) {
+        $('bootstrapStatus').textContent = `continue failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function runDevkitSelfCheck() {
+      const btn = $('devkitSelfCheckBtn')
+      btn.disabled = true
+      $('bootstrapStatus').textContent = 'running DevKit self-check with the current Node runtime…'
+      try {
+        const r = await j('/api/devkit/self-check')
+        const rows = (r.results || []).map((check) =>
+          `<div>${tag(check.ok ? 'ok' : 'err', check.ok ? 'pass' : 'fail')} <b>${esc(check.id)}</b> <span class="muted">${esc(check.command)} ${esc((check.args || []).join(' '))}</span></div>`
+        ).join('')
+        $('prepareResult').innerHTML = `<div>${tag(r.ok ? 'ok' : 'err', `${r.count || 0}/${r.total || 0}`)} <b>DevKit self-check</b> <span class="muted">Node: ${esc(r.node || '')}</span></div>${rows}`
+        $('bootstrapStatus').textContent = r.ok ? 'DevKit self-check passed.' : 'DevKit self-check failed.'
+      } catch (e) {
+        $('bootstrapStatus').textContent = `DevKit self-check failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function prepareLocalStack(options = {}) {
+      const btn = $('prepareBtn')
+      const tokenBtn = $('prepareTokenBtn')
+      btn.disabled = true
+      if (tokenBtn) tokenBtn.disabled = true
+      $('bootstrapStatus').textContent = options.githubToken ? 'preparing with one-time GitHub token…' : 'preparing local stack…'
+      $('prepareResult').innerHTML = '<span class="muted">running bootstrap, services, PWAs, and guarded Moqui readiness…</span>'
+      try {
+        const r = await fetch('/api/setup/prepare-local-stack', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options })
+        }).then((x) => x.json())
+        $('bootstrapStatus').textContent = r.ready ? 'local stack ready' : 'local stack prepared; NotNaked still has readiness gates'
+        renderPrepareResult(r)
+        await refreshAfterSetupAction()
+      } catch (e) {
+        $('bootstrapStatus').textContent = `prepare failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+        if (tokenBtn) tokenBtn.disabled = false
+      }
+    }
+
+    function prepareLocalStackWithToken() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax NotNaked repos. It is not saved.')
+      if (!githubToken) return
+      prepareLocalStack({ githubToken })
+    }
+
+    async function resolveNotNakedWithToken() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax NotNaked repos. It is not saved.')
+      if (!githubToken) return
+      const btn = $('resolveTokenBtn')
+      btn.disabled = true
+      $('bootstrapStatus').textContent = 'diagnosing, discovering, checking access, and preparing when possible…'
+      $('prepareResult').innerHTML = '<span class="muted">running token-assisted NotNaked resolve flow…</span>'
+      try {
+        const r = await fetch('/api/notnaked/resolve-with-token', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { githubToken } })
+        }).then((x) => x.json())
+        $('bootstrapStatus').textContent = r.message || 'resolve flow complete'
+        if (r.discovery) renderRepoDiscovery(r.discovery)
+        if (r.diagnostics) renderGithubTokenDiagnostics(r.diagnostics)
+        if (r.prepare) renderPrepareResult(r.prepare)
+        else {
+          const access = r.access?.counts
+          $('prepareResult').innerHTML = `<div>${tag(r.ok ? 'ok' : 'warn', r.stage || 'blocked')} <b>Resolve flow:</b> ${esc(r.message || '')}</div>` +
+            (access ? `<div class="muted">repo access: ${esc(String(access.publicOk))}/${esc(String(access.public))} public · ${esc(String(access.privateOk))}/${esc(String(access.private))} private · ${esc(String(access.missing))} missing</div>` : '')
+        }
+        await refreshAfterSetupAction()
+      } catch (e) {
+        $('bootstrapStatus').textContent = `resolve failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function upgradeArchives(options = {}) {
+      const btn = $('upgradeArchivesBtn')
+      const guideTokenBtn = $('guideUpgradeArchivesTokenBtn')
+      const tokenBtn = $('upgradeArchivesTokenBtn')
+      btn.disabled = true
+      if (tokenBtn) tokenBtn.disabled = true
+      if (guideTokenBtn) guideTokenBtn.disabled = true
+      $('upgradeArchivesStatus').textContent = options.githubToken ? 'upgrading with one-time token…' : 'checking Git availability…'
+      $('bootstrapStatus').textContent = options.githubToken ? 'upgrading archives with one-time token…' : 'checking Git availability…'
+      try {
+        const r = await fetch('/api/setup/upgrade-archives', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options })
+        }).then((x) => x.json())
+        $('upgradeArchivesStatus').textContent = r.message || (r.ok ? 'upgrade complete' : 'upgrade not available')
+        $('bootstrapStatus').textContent = r.message || (r.ok ? 'upgrade complete' : 'upgrade not available')
+        await refreshAfterSetupAction()
+      } catch (e) {
+        $('upgradeArchivesStatus').textContent = `upgrade failed · ${e.message || e}`
+        $('bootstrapStatus').textContent = `upgrade failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+        if (tokenBtn) tokenBtn.disabled = false
+        if (guideTokenBtn) guideTokenBtn.disabled = false
+      }
+    }
+
+    function upgradeArchivesWithToken() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax repos. It is not saved.')
+      if (!githubToken) return
+      upgradeArchives({ githubToken })
+    }
+
+    async function watchGitAvailability(statusId = 'upgradeArchivesStatus') {
+      const status = $(statusId)
+      for (let i = 0; i < 36; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        const state = await j('/api/source-state')
+        if (state.gitAvailable) {
+          status.textContent = 'Git is available; use Upgrade archives with token to replace archive folders with real clones.'
+          await refreshAfterSetupAction()
+          return true
+        }
+        status.textContent = `waiting for Git/CLT install… ${i + 1}/36`
+      }
+      status.textContent = 'Git is still unavailable. Finish the Apple Command Line Tools dialog, then refresh or click Install Apple CLT again.'
+      await refreshAfterSetupAction()
+      return false
+    }
+
+    function renderCommandLineToolsStatus(r) {
+      const el = $('cltStatus')
+      if (!el) return
+      el.style.display = ''
+      const cltLabels = r.softwareupdate?.commandLineToolsLabels || []
+      const labels = cltLabels.length ? `<div class="muted">softwareupdate CLT labels: <span class="mono">${esc(cltLabels.join(', '))}</span></div>` : ''
+      el.innerHTML =
+        `<div>${r.gitAvailable ? tag('ok', 'git ready') : tag('warn', 'git missing')} <span class="muted">${esc(r.message || '')}</span></div>` +
+        `<div class="muted">selected path: <span class="mono">${esc(r.selectedPath || '(none)')}</span></div>` +
+        `<div class="muted">git path: <span class="mono">${esc(r.gitPath || '(none)')}</span></div>` +
+        (!r.gitAvailable ? `<div class="muted">install command: <span class="mono">${esc(r.installCommand || 'xcode-select --install')}</span></div>` : '') +
+        (!r.gitAvailable && r.fallback?.supported ? `<div class="muted">fallback: ${esc(r.fallback.description || '')}</div>` : '') +
+        labels
+    }
+
+    async function checkCommandLineTools() {
+      const btn = $('checkCltBtn')
+      btn.disabled = true
+      $('upgradeArchivesStatus').textContent = 'checking Apple CLT status…'
+      try {
+        const r = await j('/api/setup/clt-status')
+        renderCommandLineToolsStatus(r)
+        $('upgradeArchivesStatus').textContent = r.message || (r.gitAvailable ? 'Git is available' : 'Git is unavailable')
+      } catch (e) {
+        $('upgradeArchivesStatus').textContent = `CLT status failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function installCommandLineTools(buttonId = 'installCltBtn', statusId = 'upgradeArchivesStatus', watch = false) {
+      const btn = $(buttonId)
+      if (btn) btn.disabled = true
+      const status = $(statusId)
+      status.textContent = 'opening Apple Command Line Tools installer…'
+      try {
+        const r = await fetch('/api/setup/install-clt', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((x) => x.json())
+        status.textContent = r.message || (r.ok ? 'installer requested' : 'installer unavailable')
+        if (r.status) renderCommandLineToolsStatus(r.status)
+        await loadSourceState()
+        await loadObjectiveAudit()
+        await loadGuide()
+        if (watch) await watchGitAvailability(statusId)
+      } catch (e) {
+        status.textContent = `installer failed · ${e.message || e}`
+      } finally {
+        if (btn) btn.disabled = false
+      }
+    }
+
     $('refreshAll').onclick = refreshActive
     let logTimer = null
     $('logAuto').onchange = (e) => { clearInterval(logTimer); if (e.target.checked) logTimer = setInterval(loadLogs, 5000) }
@@ -980,7 +1512,344 @@
       $('su-accxui-note').textContent = s.pwaManaged ? 'PWA management on' : 'Moqui-only — choose your accxui folder to manage the PWA dev servers'
       $('su-path').textContent = s.settingsPath
       if (s.platform !== 'darwin') $('su-status').textContent = 'Native picker is macOS-only; type the path above and Save.'
+      loadSourceState()
+      loadToolchains()
+      loadNotNakedAccess()
       return s
+    }
+
+    async function loadToolchains() {
+      const el = $('toolchains')
+      if (!el) return
+      const r = await j('/api/toolchains')
+      if (r.error) { el.innerHTML = `${tag('err', 'error')} ${esc(r.error)}`; return }
+      $('toolchainsCount').textContent = `${r.counts.ok}/${r.counts.total} ready`
+      const rows = (r.rows || []).map((x) => {
+        const state = x.present && x.ok ? tag('ok', 'ready') : (x.present ? tag('warn', 'present') : tag('err', 'missing'))
+        return `<tr><td>${state}</td><td>${esc(x.name)}</td><td class="mono">${esc(x.version || x.detail || '')}</td><td class="mono muted">${esc(x.path)}</td></tr>`
+      }).join('')
+      el.innerHTML = `<p class="muted">${r.ready ? 'Bundled Java, MySQL, Solr, Node, and pnpm are ready.' : 'One or more local toolchain checks need attention.'}</p>` +
+        `<table><thead><tr><th>state</th><th>tool</th><th>version / status</th><th>path</th></tr></thead><tbody>${rows}</tbody></table>`
+    }
+
+    async function loadSourceState() {
+      const el = $('sourceState')
+      if (!el) return
+      const r = await j('/api/source-state')
+      if (r.error) { el.innerHTML = `${tag('err', 'error')} ${esc(r.error)}`; return }
+      $('sourceStateCount').textContent = `${r.counts.clones} clones · ${r.counts.archives} archives · ${r.counts.missing} missing`
+      const rows = (r.rows || []).map((x) => {
+        const state = x.state === 'clone' ? tag('ok', 'clone') : (x.state === 'archive' ? tag('info', 'archive') : tag('warn', 'missing'))
+        return `<tr><td>${state}</td><td class="mono">${esc(x.owner)}/${esc(x.repo)}</td><td class="mono muted">${esc(x.path)}</td></tr>`
+      }).join('')
+      el.innerHTML =
+        `<p class="muted">${r.gitAvailable ? 'Git is available; Bootstrap workspace can create or upgrade real clones.' : 'Git is not available; Bootstrap workspace uses GitHub archives until Apple Command Line Tools are installed.'}` +
+        `${r.overridePath ? ` Target override: <span class="mono">${esc(r.overridePath)}</span>.` : ''}</p>` +
+        `<table><thead><tr><th>state</th><th>repo</th><th>local path</th></tr></thead><tbody>${rows}</tbody></table>`
+    }
+
+    function renderNotNakedAccess(r) {
+      const el = $('notnakedAccess')
+      if (!el) return
+      if (r.error) { el.innerHTML = `${tag('err', 'error')} ${esc(r.error)}`; return }
+      $('notnakedAccessCount').textContent = r.ready ? 'ready' : `${r.counts.missing} missing`
+      const rows = [...(r.publicRepos || []), ...(r.privateRepos || [])].map((x) => {
+        const state = x.reachable ? tag('ok', 'ok') : (x.localPresent ? tag('info', x.localGitPresent ? 'local' : 'archive') : tag('warn', 'missing'))
+        return `<tr><td>${state}</td>` +
+        `<td class="mono">${esc(x.owner)}/${esc(x.repo)}</td>` +
+        `<td class="muted">${esc(x.accessNote || x.purpose || x.message || (x.localPresent ? (x.localGitPresent ? 'present locally' : 'present locally as an archive checkout; install git/CLT to replace with a real clone') : 'not reachable'))}</td></tr>`
+      }).join('')
+      el.innerHTML =
+        `<p class="muted"><b>${esc(r.summary?.headline || (r.ready ? 'All NotNaked repos are reachable.' : 'Private NotNaked repos are not reachable yet.'))}</b> ` +
+        `${esc(r.summary?.detail || '')} ` +
+        `${r.tokenPresent ? 'Using token auth.' : 'No GITHUB_TOKEN/GH_TOKEN detected.'}` +
+        `${r.overridePath ? ` Target override: <span class="mono">${esc(r.overridePath)}</span>.` : ''}</p>` +
+        `<table><thead><tr><th>state</th><th>repo</th><th>purpose</th></tr></thead><tbody>${rows}</tbody></table>`
+    }
+
+    async function loadNotNakedAccess() {
+      renderNotNakedAccess(await j('/api/notnaked/access'))
+    }
+
+    async function checkNotNakedAccessWithToken() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax NotNaked repos. It is not saved.')
+      if (!githubToken) return
+      const btn = $('notnakedTokenCheckBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = 'checking token access…'
+      try {
+        const r = await fetch('/api/notnaked/access-check', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { githubToken } })
+        }).then((x) => x.json())
+        renderNotNakedAccess(r)
+        $('notnakedTokenStatus').textContent = r.ready ? 'token can reach all required repos' : `${r.counts?.missing ?? '?'} still missing with token`
+        await loadObjectiveAudit()
+        await loadReadiness()
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `token check failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    function renderGithubTokenDiagnostics(r) {
+      const el = $('githubTokenDiagnostics')
+      if (!el) return
+      el.style.display = ''
+      const userState = r.user?.ok ? tag('ok', 'valid') : tag('err', 'invalid')
+      const orgState = r.hotwaxOrg?.ok ? tag('ok', 'visible') : tag('warn', 'not visible')
+      const access = r.repoAccess || {}
+      const archive = r.archiveAccess || {}
+      const archiveRows = (archive.rows || []).map((row) => `${row.ok ? 'ok' : 'fail'} ${row.owner}/${row.repo} (${row.status})`).join(' · ')
+      const advice = (r.advice || []).map((x) => `<div class="muted">${esc(x)}</div>`).join('')
+      el.innerHTML =
+        `<table><tbody>` +
+        `<tr><th>token</th><td>${userState} <span class="mono">${esc(r.user?.login || r.user?.message || 'no token')}</span></td></tr>` +
+        `<tr><th>HotWax org</th><td>${orgState} <span class="muted">${esc(r.hotwaxOrg?.message || r.hotwaxOrg?.login || '')}</span></td></tr>` +
+        `<tr><th>scopes</th><td class="mono">${esc((r.scopes || []).join(', ') || '(none reported)')}</td></tr>` +
+        `<tr><th>rate</th><td class="mono">core ${esc(String(r.rate?.core?.remaining ?? '?'))}/${esc(String(r.rate?.core?.limit ?? '?'))} · search ${esc(String(r.rate?.search?.remaining ?? '?'))}/${esc(String(r.rate?.search?.limit ?? '?'))}</td></tr>` +
+        `<tr><th>repo access</th><td>${esc(String(access.publicOk ?? '?'))}/${esc(String(access.public ?? '?'))} public · ${esc(String(access.privateOk ?? '?'))}/${esc(String(access.private ?? '?'))} private · ${esc(String(access.missing ?? '?'))} missing</td></tr>` +
+        `<tr><th>archive zipballs</th><td>${esc(String(archive.ok ?? '?'))}/${esc(String(archive.total ?? '?'))} fetchable <span class="muted">${esc(archiveRows)}</span></td></tr>` +
+        `</tbody></table>${advice}`
+    }
+
+    async function diagnoseGithubToken() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax NotNaked repos. It is not saved.')
+      if (!githubToken) return
+      const btn = $('githubTokenDiagnosticsBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = 'diagnosing GitHub token…'
+      try {
+        const r = await fetch('/api/github/token-diagnostics', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { githubToken } })
+        }).then((x) => x.json())
+        renderGithubTokenDiagnostics(r)
+        $('notnakedTokenStatus').textContent = r.ok ? 'token can reach current target repos' : 'token diagnostics found remaining access gaps'
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `token diagnostics failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    function renderRepoDiscovery(r) {
+      const el = $('notnakedDiscoverResults')
+      if (!el) return
+      el.style.display = ''
+      const suggestions = r.suggestions || []
+      if (!suggestions.length) {
+        const rows = (r.results || []).map((x) => `<tr><td class="mono">${esc(x.term)}</td><td>${esc(String(x.status))}</td><td class="muted">${esc(x.message || 'no matches')}</td></tr>`).join('')
+        el.innerHTML = `<p class="muted">${esc(r.message || 'No candidate repos found.')}</p>` +
+          `<table><thead><tr><th>term</th><th>status</th><th>result</th></tr></thead><tbody>${rows}</tbody></table>`
+        return
+      }
+      const rows = suggestions.map((repo) =>
+        `<tr><td class="mono">${esc(repo.fullName)}</td>` +
+        `<td>${repo.private ? tag('warn', 'private') : tag('info', 'public')}</td>` +
+        `<td class="mono">${esc(repo.defaultBranch || 'main')}</td>` +
+        `<td class="muted">${esc((repo.matchedTerms || []).join(', '))}</td>` +
+        `<td class="muted">${esc(repo.description || '')}</td></tr>`).join('')
+      const proposal = r.proposal || {}
+      const proposalRows = (proposal.changes || []).map((x) =>
+        `<div>${tag(x.confidence === 'exact' ? 'ok' : 'warn', x.confidence)} <span class="mono">${esc(x.from)}</span> → <span class="mono">${esc(x.to)}</span></div>`).join('')
+      const proposalHtml = proposal.changed
+        ? `<div style="margin:8px 0">${proposalRows}<button onclick="reviewDiscoveryProposal()">Review proposed target</button></div>`
+        : ''
+      window.lastNotNakedDiscovery = r
+      el.innerHTML = `<p class="muted">${esc(r.message || 'Candidate repos found.')} ${proposal.changed ? 'Review the proposed target before saving.' : 'Use Edit target to apply corrected repo names.'}</p>` +
+        proposalHtml +
+        `<table><thead><tr><th>repo</th><th>type</th><th>branch</th><th>matched</th><th>description</th></tr></thead><tbody>${rows}</tbody></table>`
+    }
+
+    function reviewDiscoveryProposal() {
+      const proposal = window.lastNotNakedDiscovery?.proposal
+      if (!proposal?.text) return
+      $('targetEditor').style.display = ''
+      $('targetEditorText').value = proposal.text
+      $('targetEditorStatus').textContent = 'reviewing discovery proposal; save to apply'
+      location.hash = '#targetEditor'
+    }
+
+    async function discoverNotNakedRepos() {
+      const githubToken = prompt('Paste a one-time GitHub token with access to HotWax NotNaked repos. It is not saved.')
+      if (!githubToken) return
+      const btn = $('notnakedDiscoverBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = 'searching HotWax repos with token…'
+      try {
+        const r = await fetch('/api/notnaked/discover-repos', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { githubToken } })
+        }).then((x) => x.json())
+        renderRepoDiscovery(r)
+        $('notnakedTokenStatus').textContent = r.message || (r.ok ? 'repo discovery complete' : 'repo discovery found no candidates')
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `repo discovery failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function importLocalRepoPath() {
+      const key = prompt('Target repo to import (examples: poorti, maarg-util, notnaked, hotwax/poorti)')
+      if (!key) return
+      const sourcePath = prompt(`Local folder path for ${key}`)
+      if (!sourcePath) return
+      const btn = $('importLocalRepoBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = `importing ${key} from local path…`
+      try {
+        const r = await fetch('/api/notnaked/import-local', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { key, sourcePath } })
+        }).then((x) => x.json())
+        $('notnakedTokenStatus').textContent = r.message || (r.ok ? 'local path imported' : 'local import failed')
+        await loadSourceState()
+        await loadNotNakedAccess()
+        await loadObjectiveAudit()
+        await loadReadiness()
+        await loadGuide()
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `local import failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function importLocalRepoRoot(prepareAfterImport = false) {
+      const rootPath = prompt('Folder containing local repo folders (examples: ~/Documents/github-private, /Volumes/work/hotwax)')
+      if (!rootPath) return
+      const btn = $(prepareAfterImport ? 'importLocalRootPrepareBtn' : 'importLocalRootBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = prepareAfterImport
+        ? `scanning ${rootPath}, then preparing local stack…`
+        : `scanning ${rootPath} for target repos…`
+      try {
+        const r = await fetch('/api/notnaked/import-local-root', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { rootPath, prepareAfterImport } })
+        }).then((x) => x.json())
+        const counts = r.counts || {}
+        $('notnakedTokenStatus').textContent = r.message || (r.ok
+          ? `imported ${counts.imported || 0} (${counts.archiveImported || 0} archive), confirmed ${counts.alreadyLinked || 0}`
+          : 'local folder import found no matching target repos')
+        if (r.prepare) renderPrepare(r.prepare)
+        await loadSourceState()
+        await loadNotNakedAccess()
+        await loadObjectiveAudit()
+        await loadReadiness()
+        await loadGuide()
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `local folder import failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function writePrivateBundleRequest() {
+      const btn = $('privateBundleRequestBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = 'writing private bundle request…'
+      try {
+        const r = await fetch('/api/notnaked/private-bundle-request', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}'
+        }).then((x) => x.json())
+        $('notnakedTokenStatus').textContent = r.ok
+          ? `${r.message} ${r.markdownPath || ''}`
+          : (r.message || 'bundle request failed')
+        await loadSourceState()
+        await loadNotNakedAccess()
+        await loadReadiness()
+        if (r.ok) {
+          $('notnakedAccess').insertAdjacentHTML('afterbegin', renderPrivateBundleUnblock(r))
+        }
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `bundle request failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function writeTargetTemplate() {
+      const btn = $('targetTemplateBtn')
+      btn.disabled = true
+      $('notnakedTokenStatus').textContent = 'writing local target override…'
+      try {
+        const r = await fetch('/api/notnaked/write-target-template', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: {} })
+        }).then((x) => x.json())
+        $('notnakedTokenStatus').textContent = r.message || (r.ok ? 'target override ready' : 'target override failed')
+        await loadSourceState()
+        await loadNotNakedAccess()
+        await loadObjectiveAudit()
+        await loadReadiness()
+      } catch (e) {
+        $('notnakedTokenStatus').textContent = `target override failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    async function openTargetEditor() {
+      const editor = $('targetEditor')
+      const textarea = $('targetEditorText')
+      const status = $('targetEditorStatus')
+      const btn = $('targetEditBtn')
+      editor.style.display = ''
+      btn.disabled = true
+      status.textContent = 'loading target…'
+      try {
+        const r = await j('/api/notnaked/target')
+        if (!r.ok) throw new Error(r.error || 'target not available')
+        textarea.value = r.text || JSON.stringify(r.target || {}, null, 2)
+        status.textContent = r.exists ? `editing ${r.path}` : `editing new override at ${r.path}`
+      } catch (e) {
+        status.textContent = `load failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
+    }
+
+    function closeTargetEditor() {
+      $('targetEditor').style.display = 'none'
+      $('targetEditorStatus').textContent = ''
+    }
+
+    async function saveTargetEditor() {
+      const btn = $('targetSaveBtn')
+      btn.disabled = true
+      $('targetEditorStatus').textContent = 'validating and saving…'
+      try {
+        const r = await fetch('/api/notnaked/target', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ options: { text: $('targetEditorText').value } })
+        }).then((x) => x.json())
+        if (!r.ok) {
+          $('targetEditorStatus').textContent = (r.errors || [r.error || 'save failed']).join('; ')
+          return
+        }
+        $('targetEditorStatus').textContent = r.message || 'target override saved'
+        await loadSourceState()
+        await loadNotNakedAccess()
+        await loadObjectiveAudit()
+        await loadReadiness()
+      } catch (e) {
+        $('targetEditorStatus').textContent = `save failed · ${e.message || e}`
+      } finally {
+        btn.disabled = false
+      }
     }
     function toggleSetup() { const el = $('setup'); const show = el.style.display === 'none'; el.style.display = show ? '' : 'none'; if (show) loadSettings() }
     async function pickFolder(which) {
@@ -988,7 +1857,7 @@
       try {
         const r = await fetch('/api/pick-folder', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which }) }).then((x) => x.json())
         $('su-status').textContent = r.ok ? `Set ${which} → ${r.path}` : (r.message || 'Cancelled.')
-        if (r.ok) { await loadSettings(); loadStatus(); loadTopology(); loadLocalApps(); if (loaded.guide) loadGuide() }
+        if (r.ok) { await loadSettings(); loadStatus(); loadTopology(); loadLocalApps(); if (loaded.guide) { loadObjectiveAudit(); loadGuide() } }
       } catch (e) { $('su-status').textContent = 'picker error: ' + e }
     }
 
@@ -996,7 +1865,7 @@
     loadStatus(); loadTopology(); loadLocalApps(); loaded.arch = true
     loadSettings().then((s) => { if (!s.resolvedMoquiHome) switchTab('guide') }) // fresh machine → land on Get started
     setInterval(loadStatus, 5000)
-    setInterval(() => { const t = activeTab(); if (t === 'arch') { loadTopology(); loadLocalApps() } else if (t === 'guide') loadGuide() }, 10000)
+    setInterval(() => { const t = activeTab(); if (t === 'arch') { loadTopology(); loadLocalApps() } else if (t === 'guide') { loadObjectiveAudit(); loadReadiness(); loadGuide() } }, 10000)
   </script>
 </body>
 

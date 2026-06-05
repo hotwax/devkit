@@ -5,16 +5,41 @@
   "type": "module",
   "bin": {
     "devkit": "./moqui-console.mjs",
+    "hotwax-check-notnaked": "./check-notnaked-access.mjs",
+    "hotwax-check-readiness": "./check-notnaked-readiness.mjs",
+    "hotwax-unblock-report": "./notnaked-unblock-report.mjs",
+    "hotwax-bootstrap": "./bootstrap-hotwax-local.mjs",
+    "hotwax-devkit-control": "./devkit-control.mjs",
+    "hotwax-devkit-self-check": "./devkit-self-check.mjs",
     "moqui-console": "./moqui-console.mjs"
   },
   "files": [
     "moqui-console.mjs",
     "moqui-console.html",
+    "devkit-control.mjs",
+    "bootstrap-hotwax-local.mjs",
+    "gitless-clone.mjs",
+    "pwa-dependency-bridge.mjs",
+    "check-notnaked-access.mjs",
+    "check-notnaked-readiness.mjs",
+    "notnaked-unblock-report.mjs",
+    "notnaked-bundle-discovery.mjs",
+    "notnaked-bundle-request.mjs",
+    "notnaked-access-summary.mjs",
+    "devkit-self-check.mjs",
+    "notnaked-target.json",
+    "test/devkit-self-check.test.mjs",
+    "test/gitless-clone.test.mjs",
+    "test/pwa-dependency-bridge.test.mjs",
+    "test/notnaked-access-summary.test.mjs",
+    "test/notnaked-bundle-discovery.test.mjs",
+    "test/notnaked-bundle-request.test.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "start": "node moqui-console.mjs"
+    "start": "node moqui-console.mjs",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
@@ -36,5 +61,8 @@
   "homepage": "https://github.com/hotwax/devkit#readme",
   "bugs": {
     "url": "https://github.com/hotwax/devkit/issues"
+  },
+  "dependencies": {
+    "isomorphic-git": "^1.38.4"
   }
 }
