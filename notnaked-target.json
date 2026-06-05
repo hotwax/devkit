@@ -1,0 +1,151 @@
+{
+  "name": "notnaked-base",
+  "workspace": "~/Documents/github",
+  "publicRepos": [
+    { "owner": "hotwax", "repo": "devkit", "branch": "main", "path": "devkit" },
+    { "owner": "hotwax", "repo": "accxui", "branch": "main", "path": "accxui" },
+    { "owner": "hotwax", "repo": "moqui-framework", "branch": "main", "path": "moqui-framework" },
+    { "owner": "hotwax", "repo": "moqui-runtime", "branch": "main", "path": "moqui-runtime" },
+    { "owner": "hotwax", "repo": "oms-bi", "branch": "main", "path": "oms-bi" }
+  ],
+  "optionalRepos": [
+    { "owner": "hotwax", "repo": "available-to-promise-maarg", "branch": "main", "path": "available-to-promise-maarg" }
+  ],
+  "privateRepos": [
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-maarg-docker-config",
+      "branch": "main",
+      "path": "maarg-docker-config",
+      "purpose": "Provides myaddons.xml; DevKit uses its oms-suite component set as the runtime allow-list.",
+      "accessNote": "Required for local NotNaked/Maarg component selection."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "mantle-shopify-connector",
+      "branch": "main",
+      "path": "mantle-shopify-connector",
+      "purpose": "oms-suite component from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "OrderRouting",
+      "branch": "main",
+      "path": "order-routing",
+      "purpose": "oms-suite component order-routing from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-poorti",
+      "branch": "main",
+      "path": "poorti",
+      "purpose": "Fulfillment and receiving PWAs call /poorti/* APIs.",
+      "accessNote": "Required for NotNaked; clone hotwax/hotwax-poorti into local path poorti."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "shopify-delivery-rate",
+      "branch": "main",
+      "path": "shopify-delivery",
+      "purpose": "oms-suite component shopify-delivery from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "oms",
+      "branch": "main",
+      "path": "oms",
+      "purpose": "oms-suite component from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-erp-integration",
+      "branch": "main",
+      "path": "erp-integration",
+      "purpose": "oms-suite component erp-integration from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-maarg-util",
+      "branch": "main",
+      "path": "maarg-util",
+      "purpose": "available-to-promise-maarg declares depends-on name=\"maarg-util\".",
+      "accessNote": "Required for NotNaked; clone hotwax/hotwax-maarg-util into local path maarg-util."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-ofbiz-oms-usl",
+      "branch": "main",
+      "path": "ofbiz-oms-usl",
+      "purpose": "oms-suite component ofbiz-oms-usl from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-shopify-oms-bridge",
+      "branch": "main",
+      "path": "shopify-oms-bridge",
+      "purpose": "oms-suite component shopify-oms-bridge from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-app-bridge",
+      "branch": "main",
+      "path": "app-bridge",
+      "purpose": "oms-suite component app-bridge from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "hotwax-moqui-firebase",
+      "branch": "main",
+      "path": "moqui-firebase",
+      "purpose": "oms-suite component moqui-firebase from myaddons.xml.",
+      "accessNote": "Required for the Maarg oms-suite component set."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "notnaked",
+      "branch": "main",
+      "path": "notnaked",
+      "purpose": "Canonical active component list, data-load setup, and local run scripts.",
+      "accessNote": "Required for NotNaked; private HotWax demo component repository."
+    },
+    {
+      "owner": "hotwax",
+      "repo": "ofbiz-oms-udm",
+      "branch": "main",
+      "path": "ofbiz-oms-udm",
+      "purpose": "Official NotNaked OFBiz entity model; current local copy is a public fork fallback.",
+      "accessNote": "Official HotWax repo is required; replace any public fork fallback with the canonical clone."
+    }
+  ],
+  "activeComponents": [
+    { "source": "mantle-shopify-connector", "link": "mantle-shopify-connector" },
+    { "source": "order-routing", "link": "order-routing" },
+    { "source": "ofbiz-oms-udm", "link": "ofbiz-oms-udm" },
+    { "source": "oms-bi", "link": "oms-bi" },
+    { "source": "shopify-delivery", "link": "shopify-delivery" },
+    { "source": "oms", "link": "oms" },
+    { "source": "erp-integration", "link": "erp-integration" },
+    { "source": "maarg-util", "link": "maarg-util" },
+    { "source": "ofbiz-oms-usl", "link": "ofbiz-oms-usl" },
+    { "source": "shopify-oms-bridge", "link": "shopify-oms-bridge" },
+    { "source": "poorti", "link": "poorti" },
+    { "source": "app-bridge", "link": "app-bridge" },
+    { "source": "moqui-firebase", "link": "moqui-firebase" }
+  ],
+  "conditionalComponents": [],
+  "pwaApps": [
+    { "owner": "hotwax", "repo": "fulfillment", "branch": "main", "path": "apps/fulfillment", "port": 8101 },
+    { "owner": "hotwax", "repo": "receiving", "branch": "main", "path": "apps/receiving", "port": 8102 },
+    { "owner": "hotwax", "repo": "available-to-promise", "branch": "main", "path": "apps/available-to-promise", "port": 8105 },
+    { "owner": "hotwax", "repo": "order-manager", "branch": "main", "path": "apps/order-manager", "port": 8106 },
+    { "owner": "hotwax", "repo": "products", "branch": "main", "path": "apps/products", "port": 8107 }
+  ]
+}
