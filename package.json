@@ -1,6 +1,6 @@
 {
   "name": "@hotwax/devkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local dev cockpit for Moqui / Maarg — preflight, a JVM→PWA system-architecture map, click-to-Start/Stop/Restart, and expected-component checks. Runs via npx, no install.",
   "type": "module",
   "bin": {
