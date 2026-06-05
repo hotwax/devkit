@@ -588,6 +588,9 @@
 
     #setup .setup-row { display: flex; align-items: center; gap: 14px; padding: 11px 0; border-bottom: 1px solid #1e222b; }
     #setup .setup-row:last-of-type { border-bottom: 0; }
+    .stale-banner { background: #3a2c0e; border: 1px solid #5c4a1c; color: #f0d089; border-radius: 9px; padding: 9px 13px; margin-bottom: 14px; font-size: 13px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .stale-banner code { background: #0c0e12; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font: 12px var(--mono); color: var(--accent); }
+    .stale-banner button { padding: 3px 9px; font-size: 11px; }
     #setup .setup-info { flex: 1; min-width: 0; }
     #setup .setup-label { font-weight: 600; margin-bottom: 3px; }
     #setup .setup-val { color: var(--accent); word-break: break-all; }
@@ -615,6 +618,7 @@
   </header>
 
   <main>
+    <div id="staleBanner" class="stale-banner" style="display:none"></div>
     <div class="tabs">
       <button class="tab" data-tab="guide" onclick="switchTab('guide')">Get started</button>
       <button class="tab active" data-tab="arch" onclick="switchTab('arch')">System architecture</button>
@@ -748,6 +752,13 @@
         $('liveDot').className = 'dot ' + (live ? 'ok' : (s.port8080 ? 'warn' : 'err'))
         $('liveTxt').textContent = live ? 'Moqui up' : (s.port8080 ? '8080 held, not answering' : 'Moqui down')
         $('home').textContent = s.moquiHome ? `${s.moquiHome}${s.pid ? '  ·  pid ' + s.pid : ''}  ·  via ${s.source}` : 'no Moqui checkout found'
+        const v = s.version, b = $('staleBanner')
+        if (v && v.stale) {
+          b.style.display = ''
+          b.innerHTML = `<span>⚠ devkit <b>${esc(v.latest)}</b> is available — you're running cached <b>${esc(v.current)}</b>. Update:</span>` +
+            `<code>${esc(v.updateCmd)}</code>` +
+            `<button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent);this.textContent='copied'">copy</button>`
+        } else { b.style.display = 'none' }
       } catch { $('liveTxt').textContent = 'console error' }
     }
 

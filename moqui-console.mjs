@@ -59,6 +59,34 @@ const CWD = process.cwd()                                    // where the dev in
 const SANE_PATH = '/usr/sbin:/usr/bin:/bin:/sbin:/opt/homebrew/bin:' + (process.env.PATH || '')
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// This build's version (from package.json next to the script). Used by the freshness check.
+const VERSION = (() => { try { return JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf8')).version || '0.0.0' } catch { return '0.0.0' } })()
+const UPDATE_CMD = 'rm -rf ~/.npm/_npx && npx github:hotwax/devkit'
+
+// Freshness check: compare this build to main's package.json version. npx caches github: specs by
+// name and won't re-fetch new commits, so a cached clone runs old code silently — this makes it loud.
+// Cached for an hour; silent when current, offline, or unparseable. (Releases must bump the version.)
+let _ver = null, _verAt = 0
+function semverBehind(cur, latest) {
+  const a = String(cur).split('.').map((n) => parseInt(n, 10) || 0)
+  const b = String(latest).split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) { if ((b[i] || 0) > (a[i] || 0)) return true; if ((b[i] || 0) < (a[i] || 0)) return false }
+  return false
+}
+async function checkVersion(force = false) {
+  if (_ver && !force && Date.now() - _verAt < 3600000) return _ver
+  let latest = null
+  try {
+    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 2500)
+    const r = await fetch('https://raw.githubusercontent.com/hotwax/devkit/main/package.json', { signal: ac.signal })
+    clearTimeout(t)
+    if (r.ok) latest = (await r.json()).version
+  } catch { /* offline / timeout — stay silent */ }
+  _ver = { current: VERSION, latest, stale: !!(latest && semverBehind(VERSION, latest)), updateCmd: UPDATE_CMD }
+  _verAt = Date.now()
+  return _ver
+}
+
 // Per-project overrides: a devkit.config.json in the working dir wins over the defaults above.
 try { Object.assign(CONFIG, JSON.parse(readFileSync(join(CWD, 'devkit.config.json'), 'utf8'))) } catch { /* none */ }
 CONFIG.java11 = CONFIG.java11 || join(CONFIG.java11Home, 'bin', 'java')
@@ -608,8 +636,8 @@ async function apiTopology() {
 }
 
 async function apiStatus() {
-  const [d, moqui, live] = await Promise.all([discover(), portOwner(CONFIG.ports.moqui), probe(CONFIG.moquiLiveness, 3000)])
-  return { moquiHome: d.home, pid: d.pid, source: d.source, valid: d.valid, adjusted: d.adjusted, rawHome: d.rawHome, moquiLive: live.ok && live.status === 200, port8080: moqui.listening }
+  const [d, moqui, live, version] = await Promise.all([discover(), portOwner(CONFIG.ports.moqui), probe(CONFIG.moquiLiveness, 3000), checkVersion()])
+  return { moquiHome: d.home, pid: d.pid, source: d.source, valid: d.valid, adjusted: d.adjusted, rawHome: d.rawHome, moquiLive: live.ok && live.status === 200, port8080: moqui.listening, version }
 }
 
 // ─── write endpoints: guarded lifecycle (localhost only) ──────────────────────
@@ -816,6 +844,7 @@ const ROUTES = {
   '/api/topology': apiTopology,
   '/api/local-apps': apiLocalApps,
   '/api/setup/plan': apiSetupPlan,
+  '/api/version': () => checkVersion(true),
 }
 
 const server = createServer(async (req, res) => {
@@ -852,10 +881,16 @@ const server = createServer(async (req, res) => {
 
 server.listen(CONFIG.port, CONFIG.host, () => {
   const root = accxuiRoot()
-  console.log(`\n  moqui-console (hotwax/devkit)  →  http://${CONFIG.host}:${CONFIG.port}   (localhost only; Start/Stop/Restart enabled)`)
+  console.log(`\n  moqui-console (hotwax/devkit ${VERSION})  →  http://${CONFIG.host}:${CONFIG.port}   (localhost only; Start/Stop/Restart enabled)`)
   console.log(`  mode: ${root ? 'PWA workspace ' + root : 'Moqui-only (pick your folders in Setup ⚙)'}`)
   discover(true).then((d) => {
     if (d.home) console.log(`  MOQUI_HOME = ${d.home}  (via ${d.source}${d.pid ? ', pid ' + d.pid : ''})\n`)
     else console.log('  No Moqui found — open http://127.0.0.1:7070, click Setup ⚙, and pick your Moqui project folder.\n')
+  })
+  checkVersion().then((v) => {
+    if (v.stale) {
+      console.log(`  ⚠ devkit ${v.latest} is available — you're running ${v.current} (likely a cached npx clone).`)
+      console.log(`     Update:  ${v.updateCmd}\n`)
+    }
   })
 })
