@@ -21,13 +21,23 @@
 
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { readFile, open, readdir, lstat, readlink, realpath, mkdir, rename, unlink, stat, rm, copyFile, writeFile } from 'node:fs/promises'
+import { readFile, open, readdir, lstat, readlink, realpath, mkdir, mkdtemp, rename, unlink, stat, rm, copyFile, writeFile } from 'node:fs/promises'
 import { existsSync, openSync, writeFileSync, readFileSync, mkdirSync, createWriteStream, writeSync, closeSync } from 'node:fs'
 import { join, dirname, basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { configureMysqlDatasource } from './lib/bootstrap-config.mjs'
 import { processBelongsToWorkspace, solrBootstrapJavaArgs } from './lib/bootstrap-process.mjs'
+import {
+  buildEntityExportForm,
+  getRemoteEntityProfile,
+  keychainPasswordArgs,
+  moquiEntityLoadArgs,
+  normalizeHotwaxSource,
+  remoteEntityEndpoints,
+  remoteEntityProfiles,
+  validateEntityExport,
+} from './lib/remote-entity-import.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -1408,6 +1418,152 @@ function spawnLoad(home, loadCommand, logFile, t) {
   })
 }
 
+// Import one validated entity-export file with Moqui's standard loader. No shell is involved and
+// datasource credentials stay in the child environment, never argv or the job log.
+function spawnEntityLoad(home, location, logFile, t) {
+  return new Promise((resolve) => {
+    let fd
+    try {
+      mkdirSync(dirname(logFile), { recursive: true })
+      fd = openSync(logFile, 'a')
+      writeSync(fd, `\n=== devkit remote entity import · ${new Date().toISOString()} ===\n`)
+    } catch (e) { return resolve({ ok: false, code: -1, error: String(e) }) }
+    const env = {
+      ...process.env, PATH: `${CONFIG.java11Home}/bin:${SANE_PATH}`, JAVA_HOME: CONFIG.java11Home,
+      entity_ds_db_conf: t.dbConf, entity_ds_host: t.host, entity_ds_port: String(t.port),
+      entity_ds_database: t.database, entity_ds_user: t.user, entity_ds_password: t.password,
+    }
+    const child = spawn(CONFIG.java11, moquiEntityLoadArgs(home, location), { cwd: home, stdio: ['ignore', fd, fd], env })
+    JOB.pid = child.pid
+    child.on('error', (e) => { try { closeSync(fd) } catch { /* */ }; resolve({ ok: false, code: -1, error: String(e) }) })
+    child.on('exit', (code) => { try { closeSync(fd) } catch { /* */ }; resolve({ ok: code === 0, code }) })
+  })
+}
+
+async function readHotwaxKeychainPassword(account, source) {
+  const r = await run('/usr/bin/security', keychainPasswordArgs(account, source), 15000)
+  const password = r.stdout.trimEnd()
+  if (r.failed || !password) throw new Error(`Could not read the ${account} HotWax domain credential from macOS Keychain.`)
+  return password
+}
+
+function responseCookies(response) {
+  const values = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : [response.headers.get('set-cookie')].filter(Boolean)
+  return values.map((value) => value.split(';', 1)[0]).join('; ')
+}
+
+async function runRemoteEntityImport({ source, account, profileId }) {
+  const job = JOB
+  let tempDir = null
+  let wasUp = false
+  let restarted = false
+  try {
+    const sourceOrigin = normalizeHotwaxSource(source)
+    const profile = getRemoteEntityProfile(profileId)
+    const endpoints = remoteEntityEndpoints(sourceOrigin)
+    const d = await discover(); if (!d.home) throw new Error('No MOQUI_HOME.')
+
+    let s = stepStart('Resolve local MySQL target')
+    const t = await resolveDbTarget()
+    if (!t.ok) { stepEnd(s, 'fail', t.refuse); throw new Error(t.refuse) }
+    const ping = await dbPing(t, 'user')
+    if (!ping.ok) { stepEnd(s, 'fail', ping.error); throw new Error(`Cannot connect to local MySQL: ${ping.error}`) }
+    stepEnd(s, 'ok', `${t.database} @ ${t.host}:${t.port}`)
+
+    s = stepStart('Authenticate source', `${sourceOrigin} · Keychain account ${account}`)
+    let password = await readHotwaxKeychainPassword(account, sourceOrigin)
+    let authorization = `Basic ${Buffer.from(`${account}:${password}`, 'utf8').toString('base64')}`
+    const login = await fetch(endpoints.login, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ username: account, password }),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30000),
+    })
+    await login.arrayBuffer()
+    const cookies = responseCookies(login)
+    if (login.status !== 200 || !cookies) throw new Error(`Source login failed (HTTP ${login.status}).`)
+    stepEnd(s, 'ok', 'temporary authenticated session established')
+
+    s = stepStart('Verify source release')
+    const infoResponse = await fetch(endpoints.information, {
+      headers: { authorization, cookie: cookies, accept: 'application/json' },
+      signal: AbortSignal.timeout(30000),
+    })
+    if (!infoResponse.ok) throw new Error(`Could not read source release information (HTTP ${infoResponse.status}).`)
+    const sourceInfo = await infoResponse.json()
+    const instanceInfo = sourceInfo.instanceInfo || {}
+    const sourceSha = String(instanceInfo.commitSHA || '')
+    const release = String(instanceInfo.componentRelease || 'unknown')
+    if (!/^[0-9a-f]{7,40}$/i.test(sourceSha)) throw new Error('Source did not report a valid maarg-docker-config commit SHA.')
+    const dockerConfigDir = join(d.home, 'runtime', 'component', 'maarg-docker-config')
+    const ancestry = await run('git', ['-C', dockerConfigDir, 'merge-base', '--is-ancestor', sourceSha, 'HEAD'], 15000)
+    if (ancestry.failed) throw new Error(`Source release ${release} (${sourceSha.slice(0, 12)}) is not an ancestor of local maarg-docker-config; update the local main checkout before importing.`)
+    stepEnd(s, 'ok', `${release} · ${sourceSha.slice(0, 12)} · local checkout is same or newer`)
+
+    s = stepStart('Export safe entity profile', `${profile.label} · ${profile.entities.length} entities · source remains read-only`)
+    const exported = await fetch(endpoints.export, {
+      method: 'POST',
+      headers: {
+        authorization, cookie: cookies,
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/xml,text/xml',
+      },
+      body: buildEntityExportForm(profile),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    })
+    const exportBody = Buffer.from(await exported.arrayBuffer())
+    if (exported.status !== 200) throw new Error(`Entity export failed (HTTP ${exported.status}).`)
+    const records = validateEntityExport(exported.headers.get('content-type'), exportBody)
+    tempDir = await mkdtemp(join(tmpdir(), 'devkit-entity-import-'))
+    const exportFile = join(tempDir, 'entity-export.xml')
+    await writeFile(exportFile, exportBody, { mode: 0o600 })
+    password = ''; authorization = ''
+    stepEnd(s, 'ok', `${records.toLocaleString()} records · ${(exportBody.length / 1048576).toFixed(1)} MB`)
+
+    const stopped = await stopMoquiForJob(stepStart('Stop local Moqui'))
+    wasUp = stopped.wasUp
+
+    s = stepStart('Load into local MySQL', `create/update ${t.database} using raw entity loader`)
+    job.logFile = join(d.home, 'runtime', 'log', 'devkit-db-job.log')
+    const loaded = await spawnEntityLoad(d.home, exportFile, job.logFile, t)
+    if (!loaded.ok) { stepEnd(s, 'fail', `Moqui loader exit ${loaded.code}${loaded.error ? ' · ' + loaded.error : ''}`); throw new Error(`Entity load failed (exit ${loaded.code}). See the job log.`) }
+    stepEnd(s, 'ok', `${records.toLocaleString()} exported records processed`)
+
+    s = stepStart('Restart local Moqui')
+    if (wasUp) {
+      const started = await startMoqui(); restarted = started.ok
+      if (!started.ok) throw new Error('Import succeeded but local Moqui did not restart: ' + started.message)
+      const live = await waitForMoqui(d.httpPort || CONFIG.ports.moqui)
+      stepEnd(s, live.ok ? 'ok' : 'fail', `${started.message} · ${live.detail}`)
+      if (!live.ok) throw new Error('Import succeeded and Moqui launched, but its health check failed: ' + live.detail)
+    } else stepEnd(s, 'skip', 'Moqui was already stopped')
+
+    job.receipt = {
+      source: sourceOrigin, profile: profile.id, profileLabel: profile.label, entities: profile.entities,
+      records, bytes: exportBody.length, release, sourceCommit: sourceSha, db: t.database,
+      note: `Imported the fixed ${profile.label} profile from ${sourceOrigin}. Authentication came from Keychain; the temporary export was deleted. Search indexes were not changed.`,
+    }
+    job.ok = true
+  } catch (e) {
+    job.ok = false
+    job.error = String(e && e.message || e)
+    if (wasUp && !restarted) {
+      const s = stepStart('Recover local Moqui')
+      const started = await startMoqui().catch((error) => ({ ok: false, message: String(error) }))
+      restarted = started.ok
+      stepEnd(s, started.ok ? 'ok' : 'fail', started.message)
+    }
+  } finally {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {})
+    job.done = true
+    job.finishedAt = new Date().toISOString()
+  }
+}
+
 async function stopMoquiForJob(s) {
   const mport = (await discover()).httpPort || CONFIG.ports.moqui
   const wasUp = (await portOwner(mport)).listening
@@ -1609,6 +1765,29 @@ async function apiRevertStart(snapshot, confirm) {
   if (basename(file) !== file || !file.endsWith('.sql.gz')) return { ok: false, message: 'Invalid snapshot reference.' }
   const d = await discover(); if (!d.home || !existsSync(join(snapshotDir(d.home), file))) return { ok: false, message: 'Snapshot not found.' }
   newJob('revert'); runRevert(file)
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+async function apiRemoteEntityProfiles() {
+  return {
+    profiles: Object.values(remoteEntityProfiles).map(({ id, label, description, entities }) => ({
+      id, label, description, entityCount: entities.length,
+    })),
+    defaults: { source: 'https://rails-uat.hotwax.io', account: 'codex.aditya', profile: 'catalog-inventory' },
+  }
+}
+
+async function apiRemoteEntityImportStart(p) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const t = await resolveDbTarget(); if (!t.ok) return { ok: false, message: t.refuse }
+  if (String(p.confirm || '') !== t.database) return { ok: false, message: `Type the database name "${t.database}" exactly to confirm local create/update.` }
+  let source, profile
+  try { source = normalizeHotwaxSource(p.source); profile = getRemoteEntityProfile(p.profile) }
+  catch (e) { return { ok: false, message: String(e && e.message || e) } }
+  const account = String(p.account || '').trim()
+  if (!/^[A-Za-z0-9._@-]{1,128}$/.test(account)) return { ok: false, message: 'Keychain account contains unsupported characters.' }
+  newJob('remote-import')
+  runRemoteEntityImport({ source, account, profileId: profile.id })
   return { ok: true, started: true, jobId: JOB.id }
 }
 
@@ -1963,6 +2142,7 @@ const ROUTES = {
   '/api/version': () => checkVersion(true),
   '/api/db/target': apiDbTarget,
   '/api/db/snapshots': apiSnapshotList,
+  '/api/db/remote-profiles': apiRemoteEntityProfiles,
   '/api/db/job': apiJob,
   '/api/instances': apiInstances,
   '/api/envs': apiEnvs,
@@ -1989,6 +2169,7 @@ const server = createServer(async (req, res) => {
       if (path === '/api/db/snapshot') return sendJson(await apiSnapshotStart(p.label))
       if (path === '/api/db/reset') return sendJson(await apiResetStart(p.confirm))
       if (path === '/api/db/revert') return sendJson(await apiRevertStart(p.snapshot, p.confirm))
+      if (path === '/api/db/remote-import') return sendJson(await apiRemoteEntityImportStart(p))
       if (path === '/api/setup/bootstrap') return sendJson(await apiBootstrapStart(p.workspace, p.confirm))
       if (path === '/api/select-env') return sendJson(await apiSelectEnv(p.port))
       if (path === '/api/envs/create') return sendJson(await apiEnvCreateStart(p))

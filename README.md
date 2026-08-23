@@ -55,7 +55,7 @@ destructive and only accepts a dedicated workspace folder; it rejects `/`, your 
 DevKit checkout itself. If any step fails, the job keeps its command log in the selected workspace so
 the failure is visible in DevKit rather than becoming a hidden partial setup.
 
-## Database — reset to seed · snapshot · revert
+## Database — reset · import · snapshot · revert
 
 The **Database** tab lets you iterate without fear of corrupting data:
 
@@ -67,6 +67,12 @@ The **Database** tab lets you iterate without fear of corrupting data:
   `<MOQUI_HOME>/runtime/db-snapshots/` (auto-gitignored). Non-destructive; works while Moqui is up.
 - **Revert** — integrity-checks the snapshot, then stops Moqui, recreates the DB, restores the dump,
   clears search, and restarts.
+- **Import from HotWax** — authenticates to an HTTPS `*.hotwax.io` source with the exact
+  `hotwax-domain:hotwax.io` macOS Keychain item, verifies the source release commit is an ancestor of
+  the local `maarg-docker-config` checkout, exports one fixed non-secret entity profile, then stops
+  Moqui, creates/updates local MySQL through Moqui's raw entity loader, restarts, and deletes the
+  temporary XML. Profiles cover products, catalog, inventory, or catalog + inventory; security,
+  user-account, integration, and system-property entities are not selectable.
 
 If you run **more than one Moqui at once** (e.g. `:8080` and `:8081`), an **Environment** picker
 appears at the top of the tab listing each detected instance (port · home · database) so you choose
@@ -76,7 +82,7 @@ instances up, a reset stops the right JVM instead of guessing the first.
 
 It's deliberately **fail-closed**. devkit reads the datasource identity from the merged, comment-free
 `runtime/log/MoquiActualConf.xml` (never a regex over the hand-edited `MoquiDevConf.xml`), and
-**refuses** to act unless the datasource is local MySQL on `localhost`. Destructive actions require you
+**refuses** to act unless the datasource is local MySQL on `localhost`. Destructive and create/update actions require you
 to type the database name to confirm (re-checked server-side), the long load streams to a live log,
 and credentials are resolved server-side and **never** sent to the browser. Search is *cleared*; the
 *rebuild* is Moqui's restart — ES DataFeeds with `indexOnStartEmpty="Y"` (e.g. `OmsProduct`)

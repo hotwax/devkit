@@ -776,6 +776,10 @@
           <div class="body" id="db-reset"><span class="muted">checking…</span></div>
         </div>
         <div class="card">
+          <h2>Import from HotWax <span class="muted">— safe entity export → local MySQL</span></h2>
+          <div class="body" id="db-remote"><span class="muted">loading safe profiles…</span></div>
+        </div>
+        <div class="card">
           <h2>Snapshots <span class="muted">— DB checkpoints you can revert to</span></h2>
           <div class="body" id="db-snapshots"><span class="muted">checking…</span></div>
         </div>
@@ -1043,7 +1047,24 @@
 
     // ── database: reset to seed · snapshots · revert ──
     let dbJobTimer = null, curDb = ''
-    function loadDb() { loadEnv(); loadDbTarget(); loadSnapshots(); pollJobOnce() }
+    function loadDb() { loadEnv(); loadDbTarget(); loadRemoteProfiles(); loadSnapshots(); pollJobOnce() }
+
+    async function loadRemoteProfiles() {
+      const el = $('db-remote')
+      let data
+      try { data = await j('/api/db/remote-profiles') } catch (e) { el.innerHTML = tag('err', 'error') + ' ' + esc(e); return }
+      const defaults = data.defaults || {}
+      const options = (data.profiles || []).map((p) =>
+        `<option value="${esc(p.id)}" ${p.id === defaults.profile ? 'selected' : ''}>${esc(p.label)} (${p.entityCount})</option>`).join('')
+      const descriptions = (data.profiles || []).map((p) => `<div><b>${esc(p.label)}</b> — ${esc(p.description)}</div>`).join('')
+      el.innerHTML =
+        `<p class="muted">Authenticates with an exact macOS Keychain item, verifies the source release is not newer than local, exports only a fixed non-secret profile, then stops Moqui, creates/updates local MySQL, restarts, and deletes the temporary XML. The source is read-only.</p>` +
+        `<div class="row"><div class="k">Source</div><div class="v"><input id="remote-source" size="42" value="${esc(defaults.source || '')}" /></div></div>` +
+        `<div class="row"><div class="k">Keychain account</div><div class="v"><input id="remote-account" size="24" value="${esc(defaults.account || '')}" /></div></div>` +
+        `<div class="row"><div class="k">Safe profile</div><div class="v"><select id="remote-profile">${options}</select></div></div>` +
+        `<div class="muted" style="margin:8px 0">${descriptions}</div>` +
+        `<button onclick="doRemoteImport()">Import into local MySQL…</button> <span class="muted" id="remote-msg"></span>`
+    }
 
     async function loadEnv() {
       const card = $('db-env-card'); card.style.display = ''
@@ -1164,6 +1185,15 @@
       if (await postDb('/api/db/reset', { confirm: typed })) beginJobPoll()
     }
 
+    async function doRemoteImport() {
+      const source = ($('remote-source').value || '').trim()
+      const account = ($('remote-account').value || '').trim()
+      const profile = $('remote-profile').value
+      const typed = prompt(`Import the fixed "${profile}" profile from ${source} into local database "${curDb}"?\n\nThe source is read-only. Local matching rows may be updated and missing rows created. No automatic snapshot is made.\n\nType the local database name to continue:`)
+      if (typed === null) return
+      if (await postDb('/api/db/remote-import', { source, account, profile, confirm: typed }, $('remote-msg'))) beginJobPoll()
+    }
+
     async function doRevert(file, label) {
       const typed = prompt(`Revert PERMANENTLY REPLACES your current "${curDb}" database with snapshot "${label}". Your current data is NOT backed up first.\n\nType the database name to confirm:`)
       if (typed === null) return
@@ -1185,7 +1215,7 @@
 
     function renderJob(job) {
       const stTag = { running: 'info', ok: 'ok', fail: 'err', skip: 'dim' }
-      const title = { bootstrap: 'Clean Maarg bootstrap', reset: 'Reset to base seed', revert: 'Revert from snapshot', snapshot: 'Create snapshot', 'create-env': 'Create environment', 'delete-env': 'Delete environment' }[job.kind] || job.kind
+      const title = { bootstrap: 'Clean Maarg bootstrap', reset: 'Reset to base seed', revert: 'Revert from snapshot', snapshot: 'Create snapshot', 'remote-import': 'Import from HotWax', 'create-env': 'Create environment', 'delete-env': 'Delete environment' }[job.kind] || job.kind
       $('db-job-sub').textContent = title
       let banner
       if (!job.done) banner = `<div class="job-banner running">⟳ ${esc(title)} — ${esc(job.phase || 'running')}…</div>`
