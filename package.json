@@ -10,11 +10,13 @@
   "files": [
     "moqui-console.mjs",
     "moqui-console.html",
+    "lib/bootstrap-config.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "start": "node moqui-console.mjs"
+    "start": "node moqui-console.mjs",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

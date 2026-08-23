@@ -26,6 +26,7 @@ import { existsSync, openSync, writeFileSync, readFileSync, mkdirSync, createWri
 import { join, dirname, basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
+import { configureMysqlDatasource } from './lib/bootstrap-config.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -956,25 +957,10 @@ function spawnLogged(bin, args, cwd, logFile, env = {}) {
   })
 }
 
-function replaceConfigProperty(xml, name, value) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`(<default-property\\s+name="${escaped}"\\s+value=")[^"]*("\\s*/>)`)
-  if (re.test(xml)) return xml.replace(re, `$1${value}$2`)
-  return xml.replace('</moqui-conf>', `    <default-property name="${name}" value="${value}"/>\n</moqui-conf>`)
-}
-
 async function writeBootstrapConfig(home) {
   const path = join(home, 'runtime', 'conf', 'MoquiDevConf.xml')
-  let xml = await readFile(path, 'utf8')
-  for (const [name, value] of Object.entries({
-    entity_ds_db_conf: SETUP_DB.conf,
-    entity_ds_host: SETUP_DB.host,
-    entity_ds_port: String(SETUP_DB.port),
-    entity_ds_database: SETUP_DB.database,
-    entity_ds_user: SETUP_DB.user,
-    entity_ds_password: SETUP_DB.password,
-  })) xml = replaceConfigProperty(xml, name, value)
-  await writeFile(path, xml)
+  const xml = await readFile(path, 'utf8')
+  await writeFile(path, configureMysqlDatasource(xml, SETUP_DB))
 }
 
 async function waitForMoqui(port, timeoutMs = 180000) {
