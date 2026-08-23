@@ -27,6 +27,7 @@ import { join, dirname, basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { configureMysqlDatasource } from './lib/bootstrap-config.mjs'
+import { processBelongsToWorkspace } from './lib/bootstrap-process.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -743,6 +744,33 @@ async function stopMoqui() {
   return { ok: !o.listening, killed, message: o.listening ? `:${mport} still held by pid ${o.pid} (${o.command}) — kill manually.` : `Stopped Moqui on :${mport}. Killed ${killed.map((k) => k.pid).join(', ') || 'nothing'}.` }
 }
 
+async function stopWorkspaceSolr(root) {
+  let owner = await portOwner(CONFIG.ports.solr)
+  if (!owner.listening) return { ok: true, skipped: true, message: `No Solr process is listening on :${CONFIG.ports.solr}.` }
+  if (!owner.pid) return { ok: false, message: `Solr is listening on :${CONFIG.ports.solr}, but its PID could not be identified.` }
+
+  const [cwd, command] = await Promise.all([pidCwd(owner.pid), pidArgs(owner.pid)])
+  if (!processBelongsToWorkspace({ cwd, command }, root)) {
+    return { ok: false, message: `Refusing to stop unrelated process ${owner.pid} on :${CONFIG.ports.solr} (cwd ${cwd || 'unknown'}).` }
+  }
+
+  const targetPid = owner.pid
+  await run('kill', ['-TERM', targetPid])
+  for (let i = 0; i < 20; i++) {
+    await delay(500)
+    owner = await portOwner(CONFIG.ports.solr)
+    if (!owner.listening) return { ok: true, message: `Stopped workspace Solr process ${targetPid} on :${CONFIG.ports.solr}.` }
+    if (owner.pid !== targetPid) return { ok: false, message: `A different process ${owner.pid} took :${CONFIG.ports.solr} while stopping Solr.` }
+  }
+
+  await run('kill', ['-KILL', targetPid])
+  await delay(500)
+  owner = await portOwner(CONFIG.ports.solr)
+  return owner.listening
+    ? { ok: false, message: `Workspace Solr process ${targetPid} would not release :${CONFIG.ports.solr}.` }
+    : { ok: true, message: `Force-stopped workspace Solr process ${targetPid} on :${CONFIG.ports.solr}.` }
+}
+
 async function restartMoqui() {
   const mport = (await discover()).httpPort || CONFIG.ports.moqui
   const s = await stopMoqui()
@@ -1014,6 +1042,11 @@ async function runBootstrap(root) {
       if (!stopped.ok) { stepEnd(s, 'fail', stopped.message); throw new Error(stopped.message) }
       stepEnd(s, 'ok', stopped.message)
     }
+
+    s = stepStart('Stop existing Solr')
+    const stoppedSolr = await stopWorkspaceSolr(checked.root)
+    if (!stoppedSolr.ok) { stepEnd(s, 'fail', stoppedSolr.message); throw new Error(stoppedSolr.message) }
+    stepEnd(s, stoppedSolr.skipped ? 'skip' : 'ok', stoppedSolr.message)
 
     s = stepStart('Wipe workspace', checked.root)
     await rm(checked.root, { recursive: true, force: true })

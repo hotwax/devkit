@@ -11,6 +11,7 @@
     "moqui-console.mjs",
     "moqui-console.html",
     "lib/bootstrap-config.mjs",
+    "lib/bootstrap-process.mjs",
     "README.md",
     "LICENSE"
   ],
