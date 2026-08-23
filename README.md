@@ -47,7 +47,8 @@ and type that exact folder path to confirm. DevKit owns the full sequence:
 - configures a local MySQL `moqui` database/user, runs `omsSetup -PmaargOnly=true`, clears
   temporary Moqui launch files, and loads the standard seed/install/extension data in isolated
   Gradle invocations;
-- installs and starts Solr, then starts Moqui and waits for its login-options endpoint to return 200.
+- installs and starts Solr, runs Maarg's own services to upload every configset and create every
+  declared collection, then starts Moqui and waits for its login-options endpoint to return 200.
 
 This uses JDK 21, which the current Moqui framework requires. The bootstrap is intentionally
 destructive and only accepts a dedicated workspace folder; it rejects `/`, your home folder, and the

@@ -27,7 +27,7 @@ import { join, dirname, basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { configureMysqlDatasource } from './lib/bootstrap-config.mjs'
-import { processBelongsToWorkspace } from './lib/bootstrap-process.mjs'
+import { processBelongsToWorkspace, solrBootstrapJavaArgs } from './lib/bootstrap-process.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -1084,6 +1084,15 @@ async function runBootstrap(root) {
     await command('Load extension data', './gradlew', gradleArgs('loadProduction', '-Ptypes=ext,ext-user', '-Praw'), home, dbEnv)
     await command('Set up Solr', './gradlew', gradleArgs(':runtime:component:maarg-util:setupSolr', '-PdownloadSolr=true'), home)
     await command('Start Solr', './gradlew', gradleArgs(':runtime:component:maarg-util:startSolr'), home)
+    const solrRunnerDir = join(home, 'build', 'devkit-solr-bootstrap')
+    await rm(solrRunnerDir, { recursive: true, force: true })
+    await command('Prepare Solr initializer', 'unzip', ['-q', '-o', join(home, 'moqui.war'), '-d', solrRunnerDir], home)
+    try {
+      await command('Initialize Solr collections', CONFIG.java11,
+        solrBootstrapJavaArgs(home, solrRunnerDir, join(PKG_DIR, 'lib', 'bootstrap-solr.groovy')), home, dbEnv)
+    } finally {
+      await rm(solrRunnerDir, { recursive: true, force: true })
+    }
 
     s = stepStart('Start Moqui')
     const pid = spawnRun(home, logFile)

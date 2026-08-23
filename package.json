@@ -12,6 +12,7 @@
     "moqui-console.html",
     "lib/bootstrap-config.mjs",
     "lib/bootstrap-process.mjs",
+    "lib/bootstrap-solr.groovy",
     "README.md",
     "LICENSE"
   ],
