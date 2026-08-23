@@ -2,6 +2,7 @@ import org.moqui.Moqui
 import org.moqui.context.ArtifactExecutionInfo
 
 def ec = Moqui.getExecutionContext()
+int exitCode = 0
 try {
     ec.artifactExecution.disableAuthz()
     ec.artifactExecution.push('devkitSolrBootstrap', ArtifactExecutionInfo.AT_OTHER,
@@ -34,6 +35,12 @@ try {
     if (!created && !skipped) throw new IllegalStateException('No Solr collections were discovered or created.')
 
     println "Solr bootstrap complete: uploaded=${uploaded.size()}, created=${created.size()}, skipped=${skipped.size()}"
+} catch (Throwable t) {
+    t.printStackTrace(System.err)
+    exitCode = 1
 } finally {
     Moqui.destroyActiveExecutionContextFactory()
 }
+// MCache currently leaves its eviction thread non-daemon after framework shutdown. This runner is
+// a bounded build step, so terminate explicitly after all Moqui cleanup has completed.
+System.exit(exitCode)
