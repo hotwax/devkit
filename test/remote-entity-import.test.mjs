@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import {
   buildEntityExportForm,
@@ -10,6 +13,7 @@ import {
   normalizeHotwaxSource,
   remoteEntityEndpoints,
   remoteEntityProfiles,
+  saveEntityExportResponse,
   validateEntityExport,
 } from '../lib/remote-entity-import.mjs'
 
@@ -87,4 +91,21 @@ test('accepts only a non-empty Moqui XML entity export', () => {
   assert.equal(validateEntityExport('application/xml;charset=utf-8', xml), 1)
   assert.throws(() => validateEntityExport('text/html', Buffer.from('<html></html>')), /XML/)
   assert.throws(() => validateEntityExport('application/xml', Buffer.from('<entity-facade-xml/>')), /no records/)
+})
+
+test('streams a chunked entity export to a private file while counting top-level records', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'devkit-remote-test-'))
+  const output = join(dir, 'export.xml')
+  const encoder = new TextEncoder()
+  const chunks = ['<?xml version="1.0"?><entity-fac', 'ade-xml><products productId="P1"/>', '<products productId="P2"><productName>Two</productName></products></entity-facade-xml>']
+  const response = new Response(new ReadableStream({
+    start(controller) { for (const chunk of chunks) controller.enqueue(encoder.encode(chunk)); controller.close() },
+  }), { headers: { 'content-type': 'application/xml;charset=utf-8' } })
+
+  try {
+    const result = await saveEntityExportResponse(response, output)
+    assert.equal(result.records, 2)
+    assert.equal(result.bytes, Buffer.byteLength(chunks.join('')))
+    assert.equal(await readFile(output, 'utf8'), chunks.join(''))
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })

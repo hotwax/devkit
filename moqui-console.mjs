@@ -36,7 +36,7 @@ import {
   normalizeHotwaxSource,
   remoteEntityEndpoints,
   remoteEntityProfiles,
-  validateEntityExport,
+  saveEntityExportResponse,
 } from './lib/remote-entity-import.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
@@ -1515,14 +1515,12 @@ async function runRemoteEntityImport({ source, account, profileId }) {
       redirect: 'manual',
       signal: AbortSignal.timeout(10 * 60 * 1000),
     })
-    const exportBody = Buffer.from(await exported.arrayBuffer())
     if (exported.status !== 200) throw new Error(`Entity export failed (HTTP ${exported.status}).`)
-    const records = validateEntityExport(exported.headers.get('content-type'), exportBody)
     tempDir = await mkdtemp(join(tmpdir(), 'devkit-entity-import-'))
     const exportFile = join(tempDir, 'entity-export.xml')
-    await writeFile(exportFile, exportBody, { mode: 0o600 })
+    const { records, bytes } = await saveEntityExportResponse(exported, exportFile)
     password = ''; authorization = ''
-    stepEnd(s, 'ok', `${records.toLocaleString()} records · ${(exportBody.length / 1048576).toFixed(1)} MB`)
+    stepEnd(s, 'ok', `${records.toLocaleString()} records · ${(bytes / 1048576).toFixed(1)} MB`)
 
     const stopped = await stopMoquiForJob(stepStart('Stop local Moqui'))
     wasUp = stopped.wasUp
@@ -1544,7 +1542,7 @@ async function runRemoteEntityImport({ source, account, profileId }) {
 
     job.receipt = {
       source: sourceOrigin, profile: profile.id, profileLabel: profile.label, entities: profile.entities,
-      records, bytes: exportBody.length, release, sourceCommit: sourceSha, db: t.database,
+      records, bytes, release, sourceCommit: sourceSha, db: t.database,
       note: `Imported the fixed ${profile.label} profile from ${sourceOrigin}. Authentication came from Keychain; the temporary export was deleted. Search indexes were not changed.`,
     }
     job.ok = true
