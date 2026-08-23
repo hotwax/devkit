@@ -35,11 +35,13 @@ import {
   keychainPasswordArgs,
   moquiEntityLoadArgs,
   normalizeHotwaxSource,
+  orderEntityExportByProfile,
   remoteEntityEndpoints,
   remoteEntityProfiles,
   remoteEntityResetSql,
   saveEntityExportResponse,
   sanitizeExcludedEntityReferences,
+  sanitizeOrderCustomerData,
   splitEntityExportForLoad,
 } from './lib/remote-entity-import.mjs'
 
@@ -1457,14 +1459,38 @@ function spawnEntityLoad(home, location, logFile, t, expectedRecords) {
   })
 }
 
-async function clearRemoteEntityTarget(t) {
+async function clearRemoteEntityTarget(t, profileId) {
   const result = await run(
     'mysql',
-    [...mysqlArgs(t, 'user'), '-e', remoteEntityResetSql(t.database)],
+    [...mysqlArgs(t, 'user'), '-e', remoteEntityResetSql(t.database, profileId)],
     120000,
     mysqlEnv(t.password),
   )
   return { ok: !result.failed, code: result.code, error: result.failed ? (result.stderr || `exit ${result.code}`).split('\n')[0].slice(0, 300) : null }
+}
+
+async function readExistingPartyIds(t) {
+  const database = t.database.replaceAll('`', '``')
+  const result = await run(
+    'mysql',
+    [...mysqlArgs(t, 'user'), '--batch', '--skip-column-names', '-e', `SELECT PARTY_ID FROM \`${database}\`.PARTY`],
+    120000,
+    mysqlEnv(t.password),
+  )
+  if (result.failed) throw new Error(`Could not read existing local Party ids: ${(result.stderr || `exit ${result.code}`).split('\n')[0].slice(0, 300)}`)
+  return new Set(result.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))
+}
+
+async function readExistingInventoryItemIds(t) {
+  const database = t.database.replaceAll('`', '``')
+  const result = await run(
+    'mysql',
+    [...mysqlArgs(t, 'user'), '--batch', '--skip-column-names', '-e', `SELECT INVENTORY_ITEM_ID FROM \`${database}\`.INVENTORY_ITEM`],
+    120000,
+    mysqlEnv(t.password),
+  )
+  if (result.failed) throw new Error(`Could not read existing local InventoryItem ids: ${(result.stderr || `exit ${result.code}`).split('\n')[0].slice(0, 300)}`)
+  return new Set(result.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))
 }
 
 async function readHotwaxKeychainPassword(account, source) {
@@ -1487,6 +1513,7 @@ async function runRemoteEntityImport({ source, account, profileId }) {
   let wasUp = false
   let restarted = false
   let referenceSanitization = null
+  let privacySanitization = null
   try {
     const sourceOrigin = normalizeHotwaxSource(source)
     const profile = getRemoteEntityProfile(profileId)
@@ -1560,6 +1587,20 @@ async function runRemoteEntityImport({ source, account, profileId }) {
       stepEnd(s, 'ok', `${referenceSanitization.referencesRemoved.toLocaleString()} excluded-entity references removed · ${referenceSanitization.recordsRemoved.toLocaleString()} orphan details dropped`)
     }
 
+    if (profile.id === 'orders-customers') {
+      s = stepStart('Scrub customer and contact PII', 'filter to order-linked parties and replace personal, contact, payment, label, and free-text fields')
+      const existingPartyIds = await readExistingPartyIds(t)
+      const existingInventoryItemIds = await readExistingInventoryItemIds(t)
+      privacySanitization = await sanitizeOrderCustomerData(exportFile, existingPartyIds, existingInventoryItemIds)
+      records -= privacySanitization.recordsRemoved
+      stepEnd(s, 'ok', `${privacySanitization.customerParties.toLocaleString()} customers · ${privacySanitization.contactMechs.toLocaleString()} contact mechs scrubbed · ${privacySanitization.recordsRemoved.toLocaleString()} unrelated or pre-existing profile records excluded`)
+
+      s = stepStart('Order entity dependencies', 'stream parent entity classes before child entity classes using the fixed profile order')
+      const ordered = await orderEntityExportByProfile(exportFile, profile.entities)
+      if (ordered.records !== records) throw new Error(`Dependency ordering counted ${ordered.records} of ${records} sanitized records.`)
+      stepEnd(s, 'ok', `${ordered.records.toLocaleString()} records · ${ordered.entitiesWithRecords}/${profile.entities.length} entity classes`)
+    }
+
     s = stepStart('Prepare bounded load files', 'split the export into transactions of at most 100,000 records')
     const loadChunks = await splitEntityExportForLoad(exportFile, join(tempDir, 'load-chunks'), 100000)
     const chunkRecords = loadChunks.reduce((total, chunk) => total + chunk.records, 0)
@@ -1569,12 +1610,13 @@ async function runRemoteEntityImport({ source, account, profileId }) {
     const stopped = await stopMoquiForJob(stepStart('Stop local Moqui'))
     wasUp = stopped.wasUp
 
-    s = stepStart('Clear local commerce target', `${t.database} · fixed catalog and inventory tables only`)
-    const cleared = await clearRemoteEntityTarget(t)
+    const resetScope = profile.id === 'orders-customers' ? 'fixed order and fulfillment tables; shared party/contact seed preserved' : 'fixed catalog and inventory tables only'
+    s = stepStart('Clear local commerce target', `${t.database} · ${resetScope}`)
+    const cleared = await clearRemoteEntityTarget(t, profile.id)
     if (!cleared.ok) { stepEnd(s, 'fail', cleared.error); throw new Error(`Could not clear the local commerce target: ${cleared.error}`) }
-    stepEnd(s, 'ok', 'fixed commerce tables cleared; shared seed/configuration tables preserved')
+    stepEnd(s, 'ok', `${resetScope} cleared; shared seed/configuration tables preserved`)
 
-    s = stepStart('Load into local MySQL', `bounded raw loads into pre-cleared ${t.database} commerce tables`)
+    s = stepStart('Load into local MySQL', `bounded create-or-update loads into pre-cleared ${t.database} commerce tables`)
     job.logFile = join(d.home, 'runtime', 'log', 'devkit-db-job.log')
     let loadedRecords = 0
     for (let index = 0; index < loadChunks.length; index++) {
@@ -1599,7 +1641,7 @@ async function runRemoteEntityImport({ source, account, profileId }) {
     job.receipt = {
       source: sourceOrigin, profile: profile.id, profileLabel: profile.label, entities: profile.entities,
       sourceRecords, records, bytes, release, sourceCommit: sourceSha, db: t.database,
-      referenceSanitization, loadTransactions: loadChunks.length,
+      referenceSanitization, privacySanitization, loadTransactions: loadChunks.length,
       note: `Imported the fixed ${profile.label} profile from ${sourceOrigin}. Authentication came from Keychain; the temporary export was deleted. Search indexes were not changed.`,
     }
     job.ok = true
