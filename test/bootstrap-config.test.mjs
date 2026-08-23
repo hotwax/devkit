@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { configureMysqlDatasource } from '../lib/bootstrap-config.mjs'
+import { configureMysqlDatasource, readActiveDatasourceDefaults } from '../lib/bootstrap-config.mjs'
 
 const MYSQL = {
   conf: 'mysql8',
@@ -63,4 +63,31 @@ test('replaces existing active datasource properties without creating duplicates
   assert.equal(active.entity_ds_database, 'moqui')
   assert.equal((activeXml.match(/name="entity_ds_db_conf"/g) || []).length, 1)
   assert.equal((activeXml.match(/name="entity_ds_database"/g) || []).length, 1)
+})
+
+test('reads one unambiguous active datasource and ignores commented examples', () => {
+  const xml = `<moqui-conf>
+  <!-- <default-property name="entity_ds_database" value="wrong"/> -->
+  <default-property name="entity_ds_db_conf" value="mysql8"/>
+  <default-property name="entity_ds_host" value="127.0.0.1"/>
+  <default-property name="entity_ds_port" value="3306"/>
+  <default-property name="entity_ds_database" value="moqui"/>
+  <default-property name="entity_ds_user" value="moqui"/>
+  </moqui-conf>`
+
+  assert.deepEqual(readActiveDatasourceDefaults(xml), {
+    dbConf: 'mysql8', host: '127.0.0.1', port: '3306', database: 'moqui', user: 'moqui',
+  })
+})
+
+test('rejects an incomplete or ambiguous active datasource', () => {
+  assert.equal(readActiveDatasourceDefaults('<moqui-conf/>'), null)
+  assert.equal(readActiveDatasourceDefaults(`<moqui-conf>
+    <default-property name="entity_ds_db_conf" value="mysql8"/>
+    <default-property name="entity_ds_host" value="127.0.0.1"/>
+    <default-property name="entity_ds_port" value="3306"/>
+    <default-property name="entity_ds_database" value="one"/>
+    <default-property name="entity_ds_database" value="two"/>
+    <default-property name="entity_ds_user" value="moqui"/>
+  </moqui-conf>`), null)
 })

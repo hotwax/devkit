@@ -73,6 +73,11 @@ The **Database** tab lets you iterate without fear of corrupting data:
   Moqui, creates/updates local MySQL through Moqui's raw entity loader, restarts, and deletes the
   temporary XML. Profiles cover products, catalog, inventory, or catalog + inventory; security,
   user-account, integration, and system-property entities are not selectable.
+- **Sync postal-code reference data** — reads the non-secret shared `postalCode` collection through
+  the source instance's postal lookup API, copies it to local Solr in bounded seek-paginated batches,
+  and hard-commits only after the local count matches the source. This is separate from OMS seed data:
+  `GeoData_US.xml` contains state/group seed records and one example ZIP code, not the global lookup
+  dataset used by `lookup#PostalCode`.
 
 If you run **more than one Moqui at once** (e.g. `:8080` and `:8081`), an **Environment** picker
 appears at the top of the tab listing each detected instance (port · home · database) so you choose

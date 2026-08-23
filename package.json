@@ -1,6 +1,6 @@
 {
   "name": "@hotwax/devkit",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Local dev cockpit for Moqui / Maarg — preflight, a JVM→PWA system-architecture map, one-click clean standard OMS bootstrap, expected-component checks, DB reset/snapshots, and isolated environments. Runs via npx, no install.",
   "type": "module",
   "bin": {
@@ -14,6 +14,7 @@
     "lib/bootstrap-process.mjs",
     "lib/bootstrap-solr.groovy",
     "lib/remote-entity-import.mjs",
+    "lib/postal-code-sync.mjs",
     "README.md",
     "LICENSE"
   ],

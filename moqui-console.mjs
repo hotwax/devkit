@@ -26,7 +26,7 @@ import { existsSync, openSync, writeFileSync, readFileSync, mkdirSync, createWri
 import { join, dirname, basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
-import { configureMysqlDatasource } from './lib/bootstrap-config.mjs'
+import { configureMysqlDatasource, readActiveDatasourceDefaults } from './lib/bootstrap-config.mjs'
 import { processBelongsToWorkspace, solrBootstrapJavaArgs } from './lib/bootstrap-process.mjs'
 import {
   buildEntityExportForm,
@@ -44,6 +44,13 @@ import {
   sanitizeOrderCustomerData,
   splitEntityExportForLoad,
 } from './lib/remote-entity-import.mjs'
+import {
+  buildPostalCodePageBody,
+  createSolrJwt,
+  postalCodeEndpoint,
+  postalCodeSchemaEnvironment,
+  transferPostalCodePages,
+} from './lib/postal-code-sync.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -1210,17 +1217,28 @@ async function resolveDbTarget() {
   const cfgDb = CONFIG.db || {}
   const cfg = await apiConfig().catch(() => null)
   const haveActual = cfg && !cfg.error && cfg.db
-  const id = haveActual ? cfg.db : {}
+  const d = await discover()
+  let devDatasource = null
+  if (d.home) {
+    try {
+      devDatasource = readActiveDatasourceDefaults(await readFile(join(d.home, 'runtime', 'conf', 'MoquiDevConf.xml'), 'utf8'))
+    } catch { /* no explicit local datasource */ }
+  }
+  // MoquiActualConf.xml is shared by every process using the runtime and can be overwritten by a
+  // concurrent loader launched with another conf file. The explicit, comment-free DevConf target is
+  // the authoritative default for DevKit's own `gradlew run`; per-project CONFIG.db still wins below.
+  const id = devDatasource || (haveActual ? cfg.db : {})
+  const haveDatasource = !!devDatasource || haveActual
   const refuse = (why) => ({ ok: false, refuse: why })
 
-  const dbConf = String(cfgDb.dbConf || id.conf || '').trim()
+  const dbConf = String(cfgDb.dbConf || id.dbConf || id.conf || '').trim()
   const host = String(cfgDb.host || id.host || '').trim()
   const port = String(cfgDb.port || id.port || 3306).trim()
   const database = String(cfgDb.database || id.database || '').trim()
   const user = String(cfgDb.user || id.user || '').trim()
   const instance = haveActual ? (cfg.instance && cfg.instance.name) || '' : ''
 
-  if (!haveActual && !(cfgDb.host && cfgDb.database)) return refuse('Moqui has not generated its effective config yet (runtime/log/MoquiActualConf.xml is missing). Start Moqui once, or set "db" in devkit.config.json.')
+  if (!haveDatasource && !(cfgDb.host && cfgDb.database)) return refuse('No explicit local datasource was found in MoquiDevConf.xml or MoquiActualConf.xml. Start Moqui once, or set "db" in devkit.config.json.')
   if (!MYSQL_CONFS.has(dbConf)) return refuse(`active datasource is "${dbConf || 'unknown'}", not MySQL — reset/snapshot/revert only support a local MySQL database.`)
   if (!LOCAL_HOSTS.has(host)) return refuse(`datasource host is "${host}", not localhost — refusing to touch a non-local database.`)
   if (!DB_NAME_RE.test(database)) return refuse(`database name "${database || '(empty)'}" is not a simple identifier — refusing.`)
@@ -1661,6 +1679,165 @@ async function runRemoteEntityImport({ source, account, profileId }) {
   }
 }
 
+async function runPostalCodeSync({ source }) {
+  const job = JOB
+  let wasUp = false
+  let restarted = false
+  try {
+    const sourceUrl = postalCodeEndpoint(source)
+    const t = await resolveDbTarget()
+    if (!t.ok) throw new Error(t.refuse)
+    const d = await discover(); if (!d.home) throw new Error('No MOQUI_HOME.')
+    const solrUrl = String(t.search.solrAdminUrl || 'http://localhost:8983/solr').replace(/\/$/, '')
+    if (!isLocalUrl(solrUrl)) throw new Error(`Local Solr URL resolved to non-local host: ${solrUrl}`)
+
+    const jwtLocations = [
+      join(d.home, 'runtime', 'conf', 'solrJwtKey.txt'),
+      join(d.home, 'runtime', 'conf', 'jwtKey.txt'),
+    ]
+    const jwtLocation = jwtLocations.find((location) => existsSync(location))
+    if (!jwtLocation) throw new Error('Local Solr JWT key was not found under runtime/conf.')
+    const jwtKey = (await readFile(jwtLocation, 'utf8')).trim()
+    if (!jwtKey) throw new Error('Local Solr JWT key is empty.')
+
+    let s = stepStart('Stop local Moqui for schema reconciliation')
+    const stopped = await stopMoquiForJob(s)
+    wasUp = stopped.wasUp
+
+    s = stepStart('Apply declared Solr schema', 'supported add#MissingFields service for postalCode only')
+    const solrRunnerDir = join(d.home, 'build', 'devkit-solr-bootstrap')
+    await rm(solrRunnerDir, { recursive: true, force: true })
+    const extracted = await run('unzip', ['-q', '-o', join(d.home, 'moqui.war'), '-d', solrRunnerDir], 120000)
+    if (extracted.failed) {
+      stepEnd(s, 'fail', 'could not prepare the standalone Moqui schema runner')
+      throw new Error('Could not extract moqui.war for Solr schema reconciliation.')
+    }
+    const dbEnv = {
+      entity_ds_db_conf: t.dbConf, entity_ds_host: t.host, entity_ds_port: String(t.port),
+      entity_ds_database: t.database, entity_ds_user: t.user, entity_ds_password: t.password,
+    }
+    try {
+      const reconciled = await run(CONFIG.java11,
+        solrBootstrapJavaArgs(d.home, solrRunnerDir, join(PKG_DIR, 'lib', 'bootstrap-solr.groovy')),
+        10 * 60 * 1000, {
+          ...dbEnv,
+          ...postalCodeSchemaEnvironment(),
+          JAVA_HOME: CONFIG.java11Home,
+        })
+      if (reconciled.failed) {
+        stepEnd(s, 'fail', `schema runner exit ${reconciled.code}`)
+        throw new Error('Solr schema reconciliation failed. See the local Moqui log for details.')
+      }
+      const summary = reconciled.stdout.split(/\r?\n/).find((line) => line.startsWith('Solr bootstrap complete:'))
+      stepEnd(s, 'ok', summary || 'all declared collection schemas reconciled')
+    } finally {
+      await rm(solrRunnerDir, { recursive: true, force: true })
+    }
+
+    s = stepStart('Restart local Moqui')
+    if (wasUp) {
+      const started = await startMoqui(); restarted = started.ok
+      if (!started.ok) { stepEnd(s, 'fail', started.message); throw new Error('Schema reconciliation succeeded but Moqui did not restart.') }
+      const live = await waitForMoqui(d.httpPort || CONFIG.ports.moqui)
+      stepEnd(s, live.ok ? 'ok' : 'fail', live.detail)
+      if (!live.ok) throw new Error('Moqui launched after schema reconciliation but failed its health check.')
+    } else {
+      restarted = true
+      stepEnd(s, 'skip', 'Moqui was already stopped')
+    }
+
+    const sourcePage = async ({ after = null, rows = 10000 } = {}) => {
+      const response = await fetch(sourceUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(buildPostalCodePageBody({ after, rows })),
+        signal: AbortSignal.timeout(120000),
+      })
+      if (!response.ok) throw new Error(`Postal-code source request failed (HTTP ${response.status}).`)
+      return response.json()
+    }
+    const localSolr = async (path, { method = 'GET', body } = {}) => {
+      const response = await fetch(`${solrUrl}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${createSolrJwt(jwtKey)}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          accept: 'application/json',
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(120000),
+      })
+      const text = await response.text()
+      let result = null
+      try { result = text ? JSON.parse(text) : null } catch { /* handled below */ }
+      if (!response.ok) throw new Error(`Local Solr request failed (HTTP ${response.status}).`)
+      if (result?.responseHeader?.status != null && result.responseHeader.status !== 0) {
+        throw new Error(`Local Solr returned status ${result.responseHeader.status}.`)
+      }
+      return result
+    }
+
+    s = stepStart('Verify postal-code source', sourceUrl)
+    const probe = await sourcePage({ rows: 1 })
+    const sourceCount = Number(probe?.numFound)
+    if (!Number.isInteger(sourceCount) || sourceCount < 1 || !probe?.docs?.length) {
+      stepEnd(s, 'fail', 'source returned no usable documents')
+      throw new Error('Postal-code source returned no usable documents; local collection was not changed.')
+    }
+    stepEnd(s, 'ok', `${sourceCount.toLocaleString()} reference documents`)
+
+    s = stepStart('Verify local postalCode collection', solrUrl)
+    const before = await localSolr('/postalCode/select?q=*%3A*&rows=0&wt=json')
+    const beforeCount = Number(before?.response?.numFound || 0)
+    stepEnd(s, 'ok', `${beforeCount.toLocaleString()} existing documents · JWT authentication passed`)
+
+    s = stepStart('Clear local postalCode collection', 'delete-by-query; collection and configset are preserved')
+    await localSolr('/postalCode/update?commit=true&wt=json', { method: 'POST', body: { delete: { query: '*:*' } } })
+    stepEnd(s, 'ok', `${beforeCount.toLocaleString()} existing documents removed`)
+
+    s = stepStart('Copy postal-code reference data', `0/${sourceCount.toLocaleString()} copied`)
+    const transferred = await transferPostalCodePages({
+      rows: 10000,
+      fetchPage: sourcePage,
+      writeBatch: (documents) => localSolr('/postalCode/update?commitWithin=60000&overwrite=true&wt=json', { method: 'POST', body: documents }),
+      onProgress: ({ copied, sourceCount: total, batches }) => {
+        const percent = total ? (100 * copied / total).toFixed(1) : '100.0'
+        s.detail = `${copied.toLocaleString()}/${total.toLocaleString()} copied · ${percent}% · ${batches} batches`
+      },
+    })
+    stepEnd(s, 'ok', `${transferred.copied.toLocaleString()} documents · ${transferred.batches} batches`)
+
+    s = stepStart('Commit and verify local postalCode collection')
+    await localSolr('/postalCode/update?wt=json', { method: 'POST', body: { commit: {} } })
+    const verified = await localSolr('/postalCode/select?q=*%3A*&rows=0&wt=json')
+    const localCount = Number(verified?.response?.numFound || 0)
+    if (localCount !== transferred.sourceCount) {
+      stepEnd(s, 'fail', `${localCount.toLocaleString()} local vs ${transferred.sourceCount.toLocaleString()} source`)
+      throw new Error('Postal-code sync count verification failed.')
+    }
+    stepEnd(s, 'ok', `${localCount.toLocaleString()} local documents match source exactly`)
+
+    job.receipt = {
+      source: normalizeHotwaxSource(source), collection: 'postalCode', sourceCount: transferred.sourceCount,
+      localCount, batches: transferred.batches,
+      note: `Synced ${localCount.toLocaleString()} non-secret postal-code reference documents into the local postalCode Solr collection. Local MySQL and Moqui source files were not changed.`,
+    }
+    job.ok = true
+  } catch (e) {
+    job.ok = false
+    job.error = String(e && e.message || e)
+    if (wasUp && !restarted) {
+      const s = stepStart('Recover local Moqui')
+      const started = await startMoqui().catch((error) => ({ ok: false, message: String(error) }))
+      restarted = started.ok
+      stepEnd(s, started.ok ? 'ok' : 'fail', started.message)
+    }
+  } finally {
+    job.done = true
+    job.finishedAt = new Date().toISOString()
+  }
+}
+
 async function stopMoquiForJob(s) {
   const mport = (await discover()).httpPort || CONFIG.ports.moqui
   const wasUp = (await portOwner(mport)).listening
@@ -1885,6 +2062,18 @@ async function apiRemoteEntityImportStart(p) {
   if (!/^[A-Za-z0-9._@-]{1,128}$/.test(account)) return { ok: false, message: 'Keychain account contains unsupported characters.' }
   newJob('remote-import')
   runRemoteEntityImport({ source, account, profileId: profile.id })
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+async function apiPostalCodeSyncStart(p) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const t = await resolveDbTarget(); if (!t.ok) return { ok: false, message: t.refuse }
+  if (String(p.confirm || '') !== 'postalCode') return { ok: false, message: 'Type "postalCode" exactly to confirm replacing the local reference collection.' }
+  let source
+  try { source = normalizeHotwaxSource(p.source) }
+  catch (e) { return { ok: false, message: String(e && e.message || e) } }
+  newJob('postal-sync')
+  runPostalCodeSync({ source })
   return { ok: true, started: true, jobId: JOB.id }
 }
 
@@ -2267,6 +2456,7 @@ const server = createServer(async (req, res) => {
       if (path === '/api/db/reset') return sendJson(await apiResetStart(p.confirm))
       if (path === '/api/db/revert') return sendJson(await apiRevertStart(p.snapshot, p.confirm))
       if (path === '/api/db/remote-import') return sendJson(await apiRemoteEntityImportStart(p))
+      if (path === '/api/search/postal-sync') return sendJson(await apiPostalCodeSyncStart(p))
       if (path === '/api/setup/bootstrap') return sendJson(await apiBootstrapStart(p.workspace, p.confirm))
       if (path === '/api/select-env') return sendJson(await apiSelectEnv(p.port))
       if (path === '/api/envs/create') return sendJson(await apiEnvCreateStart(p))

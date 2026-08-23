@@ -780,6 +780,14 @@
           <div class="body" id="db-remote"><span class="muted">loading safe profiles…</span></div>
         </div>
         <div class="card">
+          <h2>Postal-code reference data <span class="muted">— shared HotWax lookup → local Solr</span></h2>
+          <div class="body">
+            <p class="muted">Copies the non-secret shared postal-code lookup collection with bounded seek pagination, replaces only local <b>postalCode</b> documents, then verifies the source and local counts match.</p>
+            <div class="row"><div class="k">Source</div><div class="v"><input id="postal-source" size="42" value="https://rails-uat.hotwax.io" /></div></div>
+            <button onclick="doPostalSync()">Sync postal codes…</button> <span class="muted" id="postal-msg"></span>
+          </div>
+        </div>
+        <div class="card">
           <h2>Snapshots <span class="muted">— DB checkpoints you can revert to</span></h2>
           <div class="body" id="db-snapshots"><span class="muted">checking…</span></div>
         </div>
@@ -1194,6 +1202,13 @@
       if (await postDb('/api/db/remote-import', { source, account, profile, confirm: typed }, $('remote-msg'))) beginJobPoll()
     }
 
+    async function doPostalSync() {
+      const source = ($('postal-source').value || '').trim()
+      const typed = prompt(`Replace the local postalCode Solr collection with shared reference data from ${source}?\n\nThis does not change MySQL or the source instance. A failed run may leave the local postalCode collection partially populated; rerun this job to replace it cleanly.\n\nType postalCode to continue:`)
+      if (typed === null) return
+      if (await postDb('/api/search/postal-sync', { source, confirm: typed }, $('postal-msg'))) beginJobPoll()
+    }
+
     async function doRevert(file, label) {
       const typed = prompt(`Revert PERMANENTLY REPLACES your current "${curDb}" database with snapshot "${label}". Your current data is NOT backed up first.\n\nType the database name to confirm:`)
       if (typed === null) return
@@ -1215,7 +1230,7 @@
 
     function renderJob(job) {
       const stTag = { running: 'info', ok: 'ok', fail: 'err', skip: 'dim' }
-      const title = { bootstrap: 'Clean Maarg bootstrap', reset: 'Reset to base seed', revert: 'Revert from snapshot', snapshot: 'Create snapshot', 'remote-import': 'Import from HotWax', 'create-env': 'Create environment', 'delete-env': 'Delete environment' }[job.kind] || job.kind
+      const title = { bootstrap: 'Clean Maarg bootstrap', reset: 'Reset to base seed', revert: 'Revert from snapshot', snapshot: 'Create snapshot', 'remote-import': 'Import from HotWax', 'postal-sync': 'Sync postal-code reference data', 'create-env': 'Create environment', 'delete-env': 'Delete environment' }[job.kind] || job.kind
       $('db-job-sub').textContent = title
       let banner
       if (!job.done) banner = `<div class="job-banner running">⟳ ${esc(title)} — ${esc(job.phase || 'running')}…</div>`
