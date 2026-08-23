@@ -31,12 +31,16 @@ import { processBelongsToWorkspace, solrBootstrapJavaArgs } from './lib/bootstra
 import {
   buildEntityExportForm,
   getRemoteEntityProfile,
+  inspectMoquiEntityLoadLog,
   keychainPasswordArgs,
   moquiEntityLoadArgs,
   normalizeHotwaxSource,
   remoteEntityEndpoints,
   remoteEntityProfiles,
+  remoteEntityResetSql,
   saveEntityExportResponse,
+  sanitizeExcludedEntityReferences,
+  splitEntityExportForLoad,
 } from './lib/remote-entity-import.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
@@ -1420,13 +1424,14 @@ function spawnLoad(home, loadCommand, logFile, t) {
 
 // Import one validated entity-export file with Moqui's standard loader. No shell is involved and
 // datasource credentials stay in the child environment, never argv or the job log.
-function spawnEntityLoad(home, location, logFile, t) {
+function spawnEntityLoad(home, location, logFile, t, expectedRecords) {
   return new Promise((resolve) => {
     let fd
+    const marker = `=== devkit remote entity import · ${JOB.id} · ${new Date().toISOString()} ===`
     try {
       mkdirSync(dirname(logFile), { recursive: true })
       fd = openSync(logFile, 'a')
-      writeSync(fd, `\n=== devkit remote entity import · ${new Date().toISOString()} ===\n`)
+      writeSync(fd, `\n${marker}\n`)
     } catch (e) { return resolve({ ok: false, code: -1, error: String(e) }) }
     const env = {
       ...process.env, PATH: `${CONFIG.java11Home}/bin:${SANE_PATH}`, JAVA_HOME: CONFIG.java11Home,
@@ -1436,8 +1441,30 @@ function spawnEntityLoad(home, location, logFile, t) {
     const child = spawn(CONFIG.java11, moquiEntityLoadArgs(home, location), { cwd: home, stdio: ['ignore', fd, fd], env })
     JOB.pid = child.pid
     child.on('error', (e) => { try { closeSync(fd) } catch { /* */ }; resolve({ ok: false, code: -1, error: String(e) }) })
-    child.on('exit', (code) => { try { closeSync(fd) } catch { /* */ }; resolve({ ok: code === 0, code }) })
+    child.on('exit', async (code) => {
+      try { closeSync(fd) } catch { /* */ }
+      let importLog
+      try {
+        const completeLog = await readFile(logFile, 'utf8')
+        const markerAt = completeLog.lastIndexOf(marker)
+        importLog = markerAt >= 0 ? completeLog.slice(markerAt + marker.length) : ''
+      } catch (e) {
+        return resolve({ ok: false, code, error: `Could not validate the Moqui loader log: ${e.message}` })
+      }
+      const inspected = inspectMoquiEntityLoadLog(importLog, expectedRecords)
+      resolve({ ok: code === 0 && inspected.ok, code, error: inspected.error, records: inspected.records })
+    })
   })
+}
+
+async function clearRemoteEntityTarget(t) {
+  const result = await run(
+    'mysql',
+    [...mysqlArgs(t, 'user'), '-e', remoteEntityResetSql(t.database)],
+    120000,
+    mysqlEnv(t.password),
+  )
+  return { ok: !result.failed, code: result.code, error: result.failed ? (result.stderr || `exit ${result.code}`).split('\n')[0].slice(0, 300) : null }
 }
 
 async function readHotwaxKeychainPassword(account, source) {
@@ -1459,6 +1486,7 @@ async function runRemoteEntityImport({ source, account, profileId }) {
   let tempDir = null
   let wasUp = false
   let restarted = false
+  let referenceSanitization = null
   try {
     const sourceOrigin = normalizeHotwaxSource(source)
     const profile = getRemoteEntityProfile(profileId)
@@ -1518,31 +1546,60 @@ async function runRemoteEntityImport({ source, account, profileId }) {
     if (exported.status !== 200) throw new Error(`Entity export failed (HTTP ${exported.status}).`)
     tempDir = await mkdtemp(join(tmpdir(), 'devkit-entity-import-'))
     const exportFile = join(tempDir, 'entity-export.xml')
-    const { records, bytes } = await saveEntityExportResponse(exported, exportFile)
+    const exportStats = await saveEntityExportResponse(exported, exportFile)
+    const sourceRecords = exportStats.records
+    let records = sourceRecords
+    const { bytes } = exportStats
     password = ''; authorization = ''
     stepEnd(s, 'ok', `${records.toLocaleString()} records · ${(bytes / 1048576).toFixed(1)} MB`)
+
+    if (profile.entities.includes('org.apache.ofbiz.product.inventory.InventoryItem')) {
+      s = stepStart('Sanitize excluded references', 'remove only foreign keys to Party, Geo, GeoPoint, and reset entities excluded from this safe profile')
+      referenceSanitization = await sanitizeExcludedEntityReferences(exportFile)
+      records -= referenceSanitization.recordsRemoved
+      stepEnd(s, 'ok', `${referenceSanitization.referencesRemoved.toLocaleString()} excluded-entity references removed · ${referenceSanitization.recordsRemoved.toLocaleString()} orphan details dropped`)
+    }
+
+    s = stepStart('Prepare bounded load files', 'split the export into transactions of at most 100,000 records')
+    const loadChunks = await splitEntityExportForLoad(exportFile, join(tempDir, 'load-chunks'), 100000)
+    const chunkRecords = loadChunks.reduce((total, chunk) => total + chunk.records, 0)
+    if (chunkRecords !== records) throw new Error(`Chunk preparation counted ${chunkRecords} of ${records} sanitized records.`)
+    stepEnd(s, 'ok', `${loadChunks.length} private transaction files · ${chunkRecords.toLocaleString()} records`)
 
     const stopped = await stopMoquiForJob(stepStart('Stop local Moqui'))
     wasUp = stopped.wasUp
 
-    s = stepStart('Load into local MySQL', `create/update ${t.database} using raw entity loader`)
+    s = stepStart('Clear local commerce target', `${t.database} · fixed catalog and inventory tables only`)
+    const cleared = await clearRemoteEntityTarget(t)
+    if (!cleared.ok) { stepEnd(s, 'fail', cleared.error); throw new Error(`Could not clear the local commerce target: ${cleared.error}`) }
+    stepEnd(s, 'ok', 'fixed commerce tables cleared; shared seed/configuration tables preserved')
+
+    s = stepStart('Load into local MySQL', `bounded raw loads into pre-cleared ${t.database} commerce tables`)
     job.logFile = join(d.home, 'runtime', 'log', 'devkit-db-job.log')
-    const loaded = await spawnEntityLoad(d.home, exportFile, job.logFile, t)
-    if (!loaded.ok) { stepEnd(s, 'fail', `Moqui loader exit ${loaded.code}${loaded.error ? ' · ' + loaded.error : ''}`); throw new Error(`Entity load failed (exit ${loaded.code}). See the job log.`) }
-    stepEnd(s, 'ok', `${records.toLocaleString()} exported records processed`)
+    let loadedRecords = 0
+    for (let index = 0; index < loadChunks.length; index++) {
+      const chunk = loadChunks[index]
+      s.detail = `transaction ${index + 1}/${loadChunks.length} · ${loadedRecords.toLocaleString()}/${records.toLocaleString()} committed`
+      const loaded = await spawnEntityLoad(d.home, chunk.location, job.logFile, t, chunk.records)
+      if (!loaded.ok) {
+        stepEnd(s, 'fail', `transaction ${index + 1}/${loadChunks.length} · Moqui loader exit ${loaded.code}${loaded.error ? ' · ' + loaded.error : ''}`)
+        throw new Error(`Entity load failed in transaction ${index + 1}/${loadChunks.length}: ${loaded.error || `exit ${loaded.code}`}. See the job log.`)
+      }
+      loadedRecords += loaded.records
+    }
+    stepEnd(s, 'ok', `${loadedRecords.toLocaleString()} exported records processed in ${loadChunks.length} committed transactions`)
 
     s = stepStart('Restart local Moqui')
-    if (wasUp) {
-      const started = await startMoqui(); restarted = started.ok
-      if (!started.ok) throw new Error('Import succeeded but local Moqui did not restart: ' + started.message)
-      const live = await waitForMoqui(d.httpPort || CONFIG.ports.moqui)
-      stepEnd(s, live.ok ? 'ok' : 'fail', `${started.message} · ${live.detail}`)
-      if (!live.ok) throw new Error('Import succeeded and Moqui launched, but its health check failed: ' + live.detail)
-    } else stepEnd(s, 'skip', 'Moqui was already stopped')
+    const started = await startMoqui(); restarted = started.ok
+    if (!started.ok) throw new Error('Import succeeded but local Moqui did not restart: ' + started.message)
+    const live = await waitForMoqui(d.httpPort || CONFIG.ports.moqui)
+    stepEnd(s, live.ok ? 'ok' : 'fail', `${started.message} · ${live.detail}`)
+    if (!live.ok) throw new Error('Import succeeded and Moqui launched, but its health check failed: ' + live.detail)
 
     job.receipt = {
       source: sourceOrigin, profile: profile.id, profileLabel: profile.label, entities: profile.entities,
-      records, bytes, release, sourceCommit: sourceSha, db: t.database,
+      sourceRecords, records, bytes, release, sourceCommit: sourceSha, db: t.database,
+      referenceSanitization, loadTransactions: loadChunks.length,
       note: `Imported the fixed ${profile.label} profile from ${sourceOrigin}. Authentication came from Keychain; the temporary export was deleted. Search indexes were not changed.`,
     }
     job.ok = true
