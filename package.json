@@ -1,7 +1,7 @@
 {
   "name": "@hotwax/devkit",
-  "version": "0.2.0",
-  "description": "Local dev cockpit for Moqui / Maarg — preflight, a JVM→PWA system-architecture map, click-to-Start/Stop/Restart, and expected-component checks. Runs via npx, no install.",
+  "version": "0.5.0",
+  "description": "Local dev cockpit for Moqui / Maarg — preflight, a JVM→PWA system-architecture map, one-click clean standard OMS bootstrap, expected-component checks, DB reset/snapshots, and isolated environments. Runs via npx, no install.",
   "type": "module",
   "bin": {
     "devkit": "./moqui-console.mjs",

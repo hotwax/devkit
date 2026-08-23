@@ -7,7 +7,7 @@
 //
 // It self-locates MOQUI_HOME (the running Moqui process, your current directory if it's inside a
 // checkout, $MOQUI_HOME, or a run script), then serves a dashboard at http://127.0.0.1:7070:
-//   preflight (Java 11, ports, MySQL/Solr, liveness) · effective config (MoquiActualConf.xml) ·
+//   preflight (Java 21, ports, MySQL/Solr, liveness) · effective config (MoquiActualConf.xml) ·
 //   loaded components + git branch/dirty state · EXPECTED components (maarg-docker-config myaddons.xml) ·
 //   a JVM→data→Moqui→REST→PWA topology with click-to-Start/Stop/Restart · log tail · diagnose.
 //
@@ -21,9 +21,9 @@
 
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { readFile, open, readdir, lstat, readlink, realpath, mkdir } from 'node:fs/promises'
-import { existsSync, openSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
-import { join, dirname, basename } from 'node:path'
+import { readFile, open, readdir, lstat, readlink, realpath, mkdir, rename, unlink, stat, rm, copyFile, writeFile } from 'node:fs/promises'
+import { existsSync, openSync, writeFileSync, readFileSync, mkdirSync, createWriteStream, writeSync, closeSync } from 'node:fs'
+import { join, dirname, basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 
@@ -31,7 +31,9 @@ import { homedir } from 'node:os'
 const CONFIG = {
   host: '127.0.0.1',
   port: Number(process.env.MOQUI_CONSOLE_PORT || process.env.PORT) || 7070,
-  java11Home: process.env.JAVA11_HOME || '/opt/homebrew/opt/openjdk@11', // mac/Homebrew default
+  // Moqui framework currently compiles with Java 21. Keep the legacy key so existing
+  // devkit.config.json files continue to work, but prefer JAVA_HOME/JAVA21_HOME.
+  java11Home: process.env.JAVA_HOME || process.env.JAVA21_HOME || process.env.JAVA11_HOME || '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home',
   ports: { moqui: 8080, mysql: 3306, solr: 8983, elasticsearch: 9200 },
   moquiLiveness: 'http://localhost:8080/rest/s1/admin/checkLoginOptions',
   solrProbe: 'http://localhost:8983/solr/',              // 401 here still means "Solr is alive"
@@ -40,6 +42,7 @@ const CONFIG = {
   moquiRunScript: process.env.MOQUI_RUN_SCRIPT || '',     // optional: a script that cd's in + `gradlew run`
   screens: { moqui: 'moqui', solr: 'moqui-solr' },        // detached GNU screen session names this tool creates
   expectedComponentSet: 'oms-suite',                      // per maarg-docker-config local-setup doc
+  envsDir: process.env.MOQUI_ENVS_DIR || join(homedir(), 'moqui-envs'), // where cloned environments live
   // HotWax PWA conventions (only used when a PWA workspace is detected in the working dir).
   // `dir` is relative to your working dir; `filter` (pnpm workspace name) or `prefix` (path) launches dev.
   pwaApps: [
@@ -354,9 +357,58 @@ async function discover(force = false) {
     if (resolved !== home) { adjusted = true; try { home = await realpath(resolved) } catch { home = resolved } }
     valid = looksLikeMoquiHome(home)
   }
-  _moquiHome = { pid, home, source, valid, rawHome, adjusted }
+  // Multi-environment: map to a running instance for the active http port + pid. An explicitly-pinned
+  // port (SETTINGS.moquiPort) selects the whole environment — home included — overriding discovery.
+  const instances = await discoverInstances()
+  let inst = null
+  if (SETTINGS.moquiPort) inst = instances.find((i) => i.port === Number(SETTINGS.moquiPort))
+  if (!inst) inst = instances.find((i) => samePath(i.home, home))
+  if (!inst && !home && instances.length) inst = instances[0]
+  let httpPort = CONFIG.ports.moqui
+  if (inst) {
+    httpPort = inst.port; pid = inst.pid
+    if (SETTINGS.moquiPort && !samePath(inst.home, home)) {     // pinned env wins over the discovered home
+      source = 'env-pinned'; rawHome = inst.home
+      try { home = await realpath(inst.home) } catch { home = inst.home }
+      const resolved = resolveMoquiHome(home)
+      if (resolved !== home) { adjusted = true; try { home = await realpath(resolved) } catch { home = resolved } }
+      valid = looksLikeMoquiHome(home)
+    }
+  } else if (home) {
+    const byConf = await readHttpPort(home); if (byConf) httpPort = byConf   // not running — read its conf
+  }
+  _moquiHome = { pid, home, source, valid, rawHome, adjusted, httpPort, instanceCount: instances.length }
   return _moquiHome
 }
+
+async function readHttpPort(home) {
+  if (!home) return null
+  try {
+    const xml = await readFile(join(home, 'runtime', 'log', 'MoquiActualConf.xml'), 'utf8')
+    const m = xml.match(/<default-property\s+name="webapp_http_port"\s+value="(\d+)"/)
+    if (m) return Number(m[1])
+  } catch { /* not run yet */ }
+  return null
+}
+
+// All running Moqui instances on this box: {pid, port, home}. Lets devkit target a chosen environment
+// when more than one Moqui is up (e.g. :8080 and :8081) instead of silently picking the first.
+async function discoverInstances() {
+  const listening = await listeningTcpPorts()
+  const out = [], seen = new Set()
+  for (const p of listening) {
+    if (p.port < 8080 || p.port > 8099) continue       // Moqui http ports; excludes the 8025 sidecar
+    if (!/java/i.test(p.command || '')) continue
+    if (seen.has(p.port)) continue
+    const home = await pidCwd(p.pid)
+    if (!home || !looksLikeMoquiHome(home)) continue
+    seen.add(p.port); out.push({ pid: p.pid, port: p.port, home })
+  }
+  out.sort((a, b) => a.port - b.port)
+  return out
+}
+const samePath = (a, b) => !!a && !!b && a.replace(/\/$/, '') === b.replace(/\/$/, '')
+const moquiLivenessUrl = (port) => `http://localhost:${port || CONFIG.ports.moqui}/rest/s1/admin/checkLoginOptions`
 
 // Map a user-picked path to the real Moqui framework home, recovering common mistakes.
 function resolveMoquiHome(picked) {
@@ -373,22 +425,23 @@ function resolveMoquiHome(picked) {
 async function apiDiscover() { return discover(true) }
 
 async function apiPreflight() {
+  const mport = (await discover()).httpPort || CONFIG.ports.moqui
   const [java11, bareJava, moqui, mysql, solr, es, live, solrProbe] = await Promise.all([
     run(CONFIG.java11, ['-version']),
-    run('java', ['-version']),
-    portOwner(CONFIG.ports.moqui),
+    run('java', ['-version'], 6000, { PATH: process.env.PATH || '' }), // use the launching shell's real PATH, not SANE_PATH (which forces /usr/bin's Apple stub first)
+    portOwner(mport),
     portOwner(CONFIG.ports.mysql),
     portOwner(CONFIG.ports.solr),
     portOwner(CONFIG.ports.elasticsearch),
-    probe(CONFIG.moquiLiveness),
+    probe(moquiLivenessUrl(mport)),
     probe(CONFIG.solrProbe),
   ])
   const java11Ver = (java11.stderr || java11.stdout).split('\n')[0] || ''
   return {
-    java11: { ok: !java11.failed, detail: java11.failed ? 'Java 11 not found at ' + CONFIG.java11 + ' (set JAVA11_HOME)' : java11Ver },
+    java11: { ok: !java11.failed, detail: java11.failed ? 'Java 21 not found at ' + CONFIG.java11 + ' (set JAVA_HOME or JAVA21_HOME)' : java11Ver },
     bareJava: { ok: !bareJava.failed, detail: bareJava.failed ? 'bare `java` not on PATH (fine — the run script / JAVA_HOME handles it)' : (bareJava.stderr || '').split('\n')[0] },
     ports: {
-      moqui: { ...moqui, expected: CONFIG.ports.moqui },
+      moqui: { ...moqui, expected: mport },
       mysql: { ...mysql, expected: CONFIG.ports.mysql },
       solr: { ...solr, expected: CONFIG.ports.solr },
       elasticsearch: { ...es, expected: CONFIG.ports.elasticsearch },
@@ -418,6 +471,10 @@ async function apiConfig() {
       database: props.entity_ds_database, user: props.entity_ds_user, schema: props.entity_ds_schema || '(default)',
     },
     searchRefs,
+    search: {
+      elasticsearchUrl: props.elasticsearch_url || '', elasticsearchPrefix: props.elasticsearch_index_prefix || '',
+      solrAdminUrl: props['solr.admin.url'] || '', solrCollection: props['solr.default.collection'] || props['solr.shared.core.name'] || '',
+    },
     instance: { purpose: props.instance_purpose, name: props['ofbiz.instance.name'], id: props['unique.instance.id'] },
     notable: {
       solr_cloud: props['solr.cloud.enable'], solr_cores: props['solr.shared.core.name'],
@@ -529,8 +586,8 @@ async function apiDiagnose() {
   else if (pre.ports.moqui.listening) add('warn', 'Port 8080 is held but Moqui is not answering /rest', `pid ${pre.ports.moqui.pid} (${pre.ports.moqui.command}) holds 8080 but liveness ${pre.moquiLiveDetail}. Likely mid-boot or wedged.`)
   else add('error', 'Moqui is not running', 'Click Start on the Moqui box, or:', CONFIG.startHint)
 
-  if (!pre.java11.ok) add('error', 'Java 11 not found', `${CONFIG.java11} did not run.`, 'brew install openjdk@11  (or set JAVA11_HOME)')
-  else if (!pre.bareJava.ok) add('info', 'Java 11 present but not on PATH', 'Fine — the run script / JAVA_HOME handles it.')
+  if (!pre.java11.ok) add('error', 'Java 21 not found', `${CONFIG.java11} did not run.`, 'brew install openjdk@21  (or set JAVA_HOME / JAVA21_HOME)')
+  else if (!pre.bareJava.ok) add('info', 'Java 21 present but not on PATH', 'Fine — DevKit sets JAVA_HOME for managed commands.')
 
   if (!pre.ports.mysql.listening) add('error', 'MySQL is down', `Moqui expects MySQL on ${CONFIG.ports.mysql} (db ${cfg.db?.database}, user ${cfg.db?.user}).`, 'brew services start mysql')
   if (!pre.solrAlive) add('warn', 'Solr is not responding on 8983', 'Search-backed APIs will fail.')
@@ -617,8 +674,8 @@ async function apiTopology() {
       n('es', 'ElasticSearch', pre.ports.elasticsearch.listening ? 'up' : 'info',
         pre.ports.elasticsearch.listening ? ':9200' : 'configured but not running (expected if you use Solr)', { port: 9200, url: pre.ports.elasticsearch.listening ? 'http://localhost:9200' : undefined }),
     ] },
-    { id: 'jvm', label: 'Java 11 JVM · foundation', nodes: [
-      n('jvm', 'Java 11', pre.java11.ok ? (procUp ? 'up' : 'info') : 'down',
+    { id: 'jvm', label: 'Java 21 JVM · foundation', nodes: [
+      n('jvm', 'Java 21', pre.java11.ok ? (procUp ? 'up' : 'info') : 'down',
         procUp ? `Moqui JVM running (pid ${pre.ports.moqui.pid})` : pre.java11.detail),
     ] },
   ]
@@ -636,45 +693,59 @@ async function apiTopology() {
 }
 
 async function apiStatus() {
-  const [d, moqui, live, version] = await Promise.all([discover(), portOwner(CONFIG.ports.moqui), probe(CONFIG.moquiLiveness, 3000), checkVersion()])
-  return { moquiHome: d.home, pid: d.pid, source: d.source, valid: d.valid, adjusted: d.adjusted, rawHome: d.rawHome, moquiLive: live.ok && live.status === 200, port8080: moqui.listening, version }
+  const d = await discover()
+  const mport = d.httpPort || CONFIG.ports.moqui
+  const [moqui, live, version] = await Promise.all([portOwner(mport), probe(moquiLivenessUrl(mport), 3000), checkVersion()])
+  return { moquiHome: d.home, pid: d.pid, source: d.source, valid: d.valid, adjusted: d.adjusted, rawHome: d.rawHome, moquiPort: mport, instanceCount: d.instanceCount, moquiLive: live.ok && live.status === 200, port8080: moqui.listening, version }
 }
 
 // ─── write endpoints: guarded lifecycle (localhost only) ──────────────────────
 
+const moquiScreen = (port) => (port === CONFIG.ports.moqui ? CONFIG.screens.moqui : `${CONFIG.screens.moqui}-${port}`)
+
 async function startMoqui() {
-  const o = await portOwner(CONFIG.ports.moqui)
-  if (o.listening) return { ok: false, message: `Moqui already running (pid ${o.pid} on :${CONFIG.ports.moqui}).` }
-  if (CONFIG.moquiRunScript && existsSync(CONFIG.moquiRunScript)) {
-    const r = await run('screen', ['-dmS', CONFIG.screens.moqui, 'bash', CONFIG.moquiRunScript])
-    if (r.failed) return { ok: false, message: `Failed to launch screen: ${r.stderr || r.code}` }
-    return { ok: true, message: `Launched Moqui in screen "${CONFIG.screens.moqui}" via the run script. Booting (~60s) — watch the status dot.` }
-  }
   const d = await discover(true)
+  const mport = d.httpPort || CONFIG.ports.moqui
+  const screen = moquiScreen(mport)
+  const o = await portOwner(mport)
+  if (o.listening) return { ok: false, message: `Moqui already running (pid ${o.pid} on :${mport}).` }
+  // A run script only applies to the default env; a non-default env always starts from its own home.
+  if (CONFIG.moquiRunScript && existsSync(CONFIG.moquiRunScript) && mport === CONFIG.ports.moqui) {
+    const r = await run('screen', ['-dmS', screen, 'bash', CONFIG.moquiRunScript])
+    if (r.failed) return { ok: false, message: `Failed to launch screen: ${r.stderr || r.code}` }
+    return { ok: true, message: `Launched Moqui in screen "${screen}" via the run script. Booting (~60s) — watch the status dot.` }
+  }
   if (!d.home) return { ok: false, message: 'No MOQUI_HOME found — set MOQUI_HOME or run from inside the checkout.' }
   const cmd = `cd ${d.home} && export JAVA_HOME=${CONFIG.java11Home} && export PATH="$JAVA_HOME/bin:$PATH" && exec ./gradlew run >> runtime/log/moqui-console.log 2>&1`
-  const r = await run('screen', ['-dmS', CONFIG.screens.moqui, 'bash', '-c', cmd])
+  const r = await run('screen', ['-dmS', screen, 'bash', '-c', cmd])
   if (r.failed) return { ok: false, message: `Failed to launch: ${r.stderr || r.code}` }
-  return { ok: true, message: `Launched Moqui (gradlew run) in screen "${CONFIG.screens.moqui}". Booting (~60s).` }
+  return { ok: true, message: `Launched Moqui (gradlew run) from ${d.home} in screen "${screen}". Booting (~60s).` }
 }
 
 async function stopMoqui() {
+  const d = await discover()
+  const mport = d.httpPort || CONFIG.ports.moqui
+  const screen = moquiScreen(mport)
   const killed = []
-  await run('screen', ['-S', CONFIG.screens.moqui, '-X', 'quit'])
-  const war = await moquiWarPid()
-  if (war) { await run('kill', [war]); killed.push({ pid: war, what: 'moqui.war JVM' }) }
+  await run('screen', ['-S', screen, '-X', 'quit'])
+  // Kill the JVM that actually owns the active port (correct even with several Moqui instances up),
+  // falling back to the discovered pid. Never a blanket moqui.war kill — that could hit another env.
+  let o = await portOwner(mport)
+  const target = o.listening ? o.pid : d.pid
+  if (target) { await run('kill', [target]); killed.push({ pid: target, what: `moqui.war JVM (:${mport})` }) }
   await delay(1500)
-  let o = await portOwner(CONFIG.ports.moqui)
-  if (o.listening) { // an orphan (e.g. GradleDaemon) still holds 8080 — kill exactly that PID
-    await run('kill', [o.pid]); killed.push({ pid: o.pid, what: `${o.command} (held :8080)` })
-    await delay(1000); o = await portOwner(CONFIG.ports.moqui)
+  o = await portOwner(mport)
+  if (o.listening) { // an orphan (e.g. GradleDaemon) still holds the port — kill exactly that PID
+    await run('kill', [o.pid]); killed.push({ pid: o.pid, what: `${o.command} (held :${mport})` })
+    await delay(1000); o = await portOwner(mport)
   }
-  return { ok: !o.listening, killed, message: o.listening ? `:8080 still held by pid ${o.pid} (${o.command}) — kill manually.` : `Stopped Moqui. Killed ${killed.map((k) => k.pid).join(', ') || 'nothing'}.` }
+  return { ok: !o.listening, killed, message: o.listening ? `:${mport} still held by pid ${o.pid} (${o.command}) — kill manually.` : `Stopped Moqui on :${mport}. Killed ${killed.map((k) => k.pid).join(', ') || 'nothing'}.` }
 }
 
 async function restartMoqui() {
+  const mport = (await discover()).httpPort || CONFIG.ports.moqui
   const s = await stopMoqui()
-  for (let i = 0; i < 12; i++) { const o = await portOwner(CONFIG.ports.moqui); if (!o.listening) break; await delay(1000) }
+  for (let i = 0; i < 12; i++) { const o = await portOwner(mport); if (!o.listening) break; await delay(1000) }
   const st = await startMoqui()
   return { ok: st.ok, killed: s.killed, message: `${s.message}  Then: ${st.message}` }
 }
@@ -733,6 +804,7 @@ function setPath(which, p) {
   p = (p || '').trim(); if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
   if (which === 'moqui') SETTINGS.moquiHome = p || undefined
   else if (which === 'accxui') SETTINGS.accxuiHome = p || undefined
+  else if (which === 'setupWorkspace') SETTINGS.setupWorkspace = p ? resolve(p) : undefined
   else return { ok: false, message: `Unknown setting "${which}"` }
   const saved = saveSettings(); _moquiHome = null // bust discovery cache so the change applies now
   return { ok: true, which, path: p, saved, settingsPath: SETTINGS_PATH }
@@ -754,23 +826,52 @@ async function apiSettings() {
   const d = await discover(true)
   const root = accxuiRoot()
   return {
-    moquiHome: SETTINGS.moquiHome || '', accxuiHome: SETTINGS.accxuiHome || '',
+    moquiHome: SETTINGS.moquiHome || '', accxuiHome: SETTINGS.accxuiHome || '', setupWorkspace: setupWorkspace(),
     resolvedMoquiHome: d.home || '', moquiSource: d.source, moquiValid: d.valid, moquiAdjusted: d.adjusted, moquiRaw: d.rawHome || '',
+    activePort: d.httpPort, pinnedPort: SETTINGS.moquiPort || null, instanceCount: d.instanceCount,
     pwaManaged: !!root, accxuiResolved: root || '',
     platform: process.platform, settingsPath: SETTINGS_PATH,
   }
 }
 
-// ─── onboarding wizard (Phase 1: read-only guide — detect state + prescribe the next command) ──
-// Standard setup only: MySQL 8, oms-suite, default ports. No in-flow customization.
+// All running Moqui environments, for the picker. `active` marks the one devkit currently targets.
+async function apiInstances() {
+  const instances = await discoverInstances()
+  const active = await discover()
+  const out = []
+  for (const i of instances) {
+    const live = await probe(moquiLivenessUrl(i.port), 2000)
+    let database = '', dbConf = ''
+    try { const xml = await readFile(join(i.home, 'runtime', 'log', 'MoquiActualConf.xml'), 'utf8')
+      database = (xml.match(/name="entity_ds_database"\s+value="([^"]*)"/) || [])[1] || ''
+      dbConf = (xml.match(/name="entity_ds_db_conf"\s+value="([^"]*)"/) || [])[1] || '' } catch { /* not run */ }
+    out.push({ pid: i.pid, port: i.port, home: i.home, database, dbConf, live: live.ok && live.status === 200, active: i.port === active.httpPort && samePath(i.home, active.home) })
+  }
+  return { instances: out, pinnedPort: SETTINGS.moquiPort || null, activePort: active.httpPort }
+}
+
+// Pin the active Moqui environment by http port (also pins its home so they stay consistent). Empty = auto.
+async function apiSelectEnv(port) {
+  if (!port) { SETTINGS.moquiPort = undefined; const saved = saveSettings(); _moquiHome = null; return { ok: true, cleared: true, saved } }
+  port = Number(port)
+  const inst = (await discoverInstances()).find((i) => i.port === port)
+  if (!inst) return { ok: false, message: `No running Moqui found on :${port}.` }
+  SETTINGS.moquiPort = port; SETTINGS.moquiHome = inst.home
+  const saved = saveSettings(); _moquiHome = null
+  return { ok: true, port, home: inst.home, saved }
+}
+
+// ─── onboarding wizard: a guarded standard Maarg bootstrap ─────────────────────
+// Standard setup only: MySQL 8, oms-suite, default ports. The workspace is an
+// explicitly chosen parent folder; its moqui-framework child is the Moqui home.
 const SETUP_DB = { conf: 'mysql8', host: '127.0.0.1', port: 3306, database: 'moqui', user: 'moqui', password: 'moqui' }
-const SETUP_DEFAULT_WS = join(homedir(), 'moqui-framework')
-const setupWorkspace = () => ((SETTINGS.moquiHome || '').trim() || SETUP_DEFAULT_WS)
+const SETUP_DEFAULT_WS = join(homedir(), 'maarg-oms')
+const setupWorkspace = () => resolve((SETTINGS.setupWorkspace || CONFIG.setupWorkspace || '').trim() || (SETTINGS.moquiHome ? dirname(SETTINGS.moquiHome) : SETUP_DEFAULT_WS))
+const setupHome = () => join(setupWorkspace(), 'moqui-framework')
 
 async function apiSetupPlan() {
   const ws = setupWorkspace()
-  const d = await discover()
-  const home = (d.home && existsSync(d.home)) ? d.home : ws
+  const home = setupHome()
   const J = CONFIG.java11Home
   const gradle = (c) => `cd "${home}" && export JAVA_HOME="${J}" && ./gradlew ${c}`
 
@@ -791,14 +892,13 @@ async function apiSetupPlan() {
   const exp = maargOk ? await apiExpectations(CONFIG.expectedComponentSet).catch(() => null) : null
   const componentsOk = !!(exp && exp.counts && exp.counts.expected > 0 && exp.counts.missing === 0)
   const repoOk = repoProbe || componentsOk // if the private components are already cloned, access is proven
-  const cfg = await apiConfig().catch(() => null) // effective merged config (authoritative once Moqui has run)
-  let dbConfigured = !!(cfg && cfg.db && cfg.db.conf === 'mysql8' && cfg.db.database)
-  if (!dbConfigured) {
-    try {
-      const x = readFileSync(join(home, 'runtime', 'conf', 'MoquiDevConf.xml'), 'utf8')
-      dbConfigured = /entity_ds_db_conf"\s+value="mysql8"/.test(x) && /entity_ds_database"\s+value="[^"]+"/.test(x)
-    } catch { /* not configured */ }
-  }
+  // The guide must describe its selected bootstrap target, not an unrelated
+  // running Moqui that discover() may find elsewhere on the machine.
+  let dbConfigured = false
+  try {
+    const x = readFileSync(join(home, 'runtime', 'conf', 'MoquiDevConf.xml'), 'utf8')
+    dbConfigured = /entity_ds_db_conf"\s+value="mysql8"/.test(x) && /entity_ds_database"\s+value="[^"]+"/.test(x)
+  } catch { /* target does not exist yet */ }
   const omssetupOk = existsSync(join(home, 'runtime', 'conf', 'jwtKey.txt'))
   const moquiUp = live.ok && live.status === 200
   const searchOk = esUp || solr
@@ -806,23 +906,23 @@ async function apiSetupPlan() {
   const steps = [
     { phase: 'Prerequisites', id: 'brew', title: 'Homebrew', why: 'Package manager for the rest.', status: brewOk ? 'done' : 'warn', manual: !brewOk, detail: brewOk ? 'installed' : 'install in a real Terminal — it prompts for your password', command: brewOk ? null : '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' },
     { phase: 'Prerequisites', id: 'git', title: 'Git', why: 'To clone Moqui + components.', status: gitOk ? 'done' : 'todo', command: gitOk ? null : 'xcode-select --install   # or: brew install git' },
-    { phase: 'Prerequisites', id: 'jdk11', title: 'JDK 11', why: 'Moqui runs on Java 11.', status: jdkOk ? 'done' : 'todo', detail: jdkOk ? J : 'not found', command: jdkOk ? null : 'brew install openjdk@11' },
+    { phase: 'Prerequisites', id: 'jdk21', title: 'JDK 21', why: 'Current Moqui framework compiles and runs on Java 21.', status: jdkOk ? 'done' : 'todo', detail: jdkOk ? J : 'not found', command: jdkOk ? null : 'brew install openjdk@21' },
     { phase: 'Prerequisites', id: 'mysql', title: 'MySQL 8', why: 'Standard OMS database.', status: mysqlUp ? 'done' : (mysqlBin ? 'warn' : 'todo'), detail: mysqlUp ? 'running on :3306' : (mysqlBin ? 'installed, not running' : 'not installed'), command: mysqlUp ? null : (mysqlBin ? 'brew services start mysql' : 'brew install mysql && brew services start mysql') },
     { phase: 'Prerequisites', id: 'node', title: 'Node 18+', why: 'Runs devkit + PWA dev servers.', status: 'done', detail: 'devkit is running on ' + process.version },
     { phase: 'Prerequisites', id: 'repo', title: 'HotWax repo access', why: 'oms-suite components are private.', status: repoOk ? 'done' : 'warn', detail: repoOk ? 'authenticated to github.com/hotwax' : 'no access detected — add an SSH key or run `gh auth login`', command: repoOk ? null : 'gh auth login   # or add an SSH key with access to github.com/hotwax' },
 
-    { phase: 'Source', id: 'workspace', title: 'Workspace folder', why: 'Where Moqui gets cloned.', status: 'info', editable: true, detail: home + (existsSync(home) ? '  (exists)' : '  (will be created)') },
+    { phase: 'Source', id: 'workspace', title: 'Workspace folder', why: 'The entire folder DevKit will replace before cloning.', status: 'info', editable: true, detail: ws + (existsSync(ws) ? '  (exists)' : '  (will be created)') },
     { phase: 'Source', id: 'framework', title: 'Clone moqui-framework', why: 'The Moqui engine.', status: frameworkOk ? 'done' : 'todo', command: frameworkOk ? null : `git clone -b main https://github.com/hotwax/moqui-framework.git "${home}"` },
     { phase: 'Source', id: 'runtime', title: 'Clone moqui-runtime', why: 'The runtime Moqui loads.', status: runtimeOk ? 'done' : (frameworkOk ? 'todo' : 'blocked'), command: runtimeOk ? null : `cd "${home}" && git clone -b main https://github.com/hotwax/moqui-runtime.git runtime` },
     { phase: 'Source', id: 'maarg', title: 'Clone maarg-docker-config + myaddons.xml', why: 'Declares the OMS components.', status: maargOk ? 'done' : (runtimeOk ? 'todo' : 'blocked'), command: maargOk ? null : `cd "${home}" && git clone -b main https://github.com/hotwax/hotwax-maarg-docker-config.git runtime/component/maarg-docker-config && cp runtime/component/maarg-docker-config/myaddons.xml myaddons.xml` },
 
-    { phase: 'Components', id: 'components', title: 'Get oms-suite component set', why: 'The 13 standard OMS components.', status: componentsOk ? 'done' : (maargOk ? 'todo' : 'blocked'), detail: exp?.counts ? `${exp.counts.present}/${exp.counts.expected} present` : 'needs maarg-docker-config first', command: componentsOk ? null : gradle('getComponentSet -PcomponentSet=oms-suite') },
+    { phase: 'Components', id: 'components', title: 'Get oms-suite component set', why: 'The standard OMS components declared by myaddons.xml.', status: componentsOk ? 'done' : (maargOk ? 'todo' : 'blocked'), detail: exp?.counts ? `${exp.counts.present}/${exp.counts.expected} present` : 'needs maarg-docker-config first', command: componentsOk ? null : gradle('getComponentSet -PcomponentSet=oms-suite') },
 
-    { phase: 'Database', id: 'dbcreate', title: 'Create database + user', why: `Standard db "${SETUP_DB.database}", user "${SETUP_DB.user}".`, status: dbConfigured ? 'done' : (mysqlUp ? 'todo' : 'blocked'), command: `mysql -u root -e "CREATE DATABASE IF NOT EXISTS ${SETUP_DB.database}; CREATE USER IF NOT EXISTS '${SETUP_DB.user}'@'localhost' IDENTIFIED BY '${SETUP_DB.password}'; GRANT ALL ON ${SETUP_DB.database}.* TO '${SETUP_DB.user}'@'localhost'; FLUSH PRIVILEGES;"` },
+    { phase: 'Database', id: 'dbcreate', title: 'Recreate database + user', why: `A clean bootstrap replaces local db "${SETUP_DB.database}" and uses user "${SETUP_DB.user}".`, status: dbConfigured ? 'done' : (mysqlUp ? 'todo' : 'blocked'), detail: 'bootstrap-only destructive step', command: `mysql -u root -e "DROP DATABASE IF EXISTS ${SETUP_DB.database}; CREATE DATABASE ${SETUP_DB.database}; CREATE USER IF NOT EXISTS '${SETUP_DB.user}'@'localhost' IDENTIFIED BY '${SETUP_DB.password}'; GRANT ALL ON ${SETUP_DB.database}.* TO '${SETUP_DB.user}'@'localhost'; FLUSH PRIVILEGES;"` },
     { phase: 'Database', id: 'dbconfig', title: 'Point Moqui at MySQL', why: 'Write the datasource props.', status: dbConfigured ? 'done' : (frameworkOk ? 'todo' : 'blocked'), detail: 'runtime/conf/MoquiDevConf.xml', command: `# add under <entity-facade> in "${home}"/runtime/conf/MoquiDevConf.xml:\n<default-property name="entity_ds_db_conf" value="mysql8"/>\n<default-property name="entity_ds_host" value="${SETUP_DB.host}"/>\n<default-property name="entity_ds_port" value="${SETUP_DB.port}"/>\n<default-property name="entity_ds_database" value="${SETUP_DB.database}"/>\n<default-property name="entity_ds_user" value="${SETUP_DB.user}"/>\n<default-property name="entity_ds_password" value="${SETUP_DB.password}"/>` },
 
-    { phase: 'Initialize', id: 'omssetup', title: 'Run omssetup', why: 'Generates JWT + encryption keys.', status: omssetupOk ? 'done' : (frameworkOk ? 'todo' : 'blocked'), command: gradle('omssetup') },
-    { phase: 'Initialize', id: 'data', title: 'Load seed + install + ext data', why: 'Populates the database (slow, re-runnable).', status: 'todo', detail: 'best-effort detection; safe to re-run', command: `${gradle('loadProduction -Ptypes=seed,seed-initial,install -Praw')}\n${gradle('loadProduction -Ptypes=ext-seed -Praw')}\n${gradle('loadProduction -Ptypes=ext,ext-user -Praw')}` },
+    { phase: 'Initialize', id: 'omssetup', title: 'Run omsSetup', why: 'Generates JWT + encryption keys.', status: omssetupOk ? 'done' : (frameworkOk ? 'todo' : 'blocked'), command: gradle('omsSetup -PmaargOnly=true') },
+    { phase: 'Initialize', id: 'data', title: 'Clear launch files, then load seed + install + ext data', why: 'Populates the database from a clean Moqui launch directory (slow, re-runnable).', status: 'todo', detail: 'best-effort detection; safe to re-run', command: `${gradle('cleanTempDir')}\n${gradle('loadProduction -Ptypes=seed,seed-initial,install -Praw')}\n${gradle('loadProduction -Ptypes=ext-seed -Praw')}\n${gradle('loadProduction -Ptypes=ext,ext-user -Praw')}` },
 
     { phase: 'Search (optional)', id: 'search', title: 'OpenSearch / Solr', why: 'Powers search-backed features — optional.', status: searchOk ? 'done' : 'optional', optional: true, command: searchOk ? null : `${gradle('downloadOpenSearch')} && ${gradle('startElasticSearch')}` },
 
@@ -830,7 +930,995 @@ async function apiSetupPlan() {
   ]
   const total = steps.filter((s) => s.status !== 'info').length
   const done = steps.filter((s) => s.status === 'done').length
-  return { workspace: home, java11Home: J, db: SETUP_DB, summary: { done, total }, steps }
+  return { workspace: home, workspaceRoot: ws, javaHome: J, db: SETUP_DB, summary: { done, total }, steps }
+}
+
+const isWithin = (path, parent) => path === parent || path.startsWith(parent + '/')
+function bootstrapRootIsSafe(root) {
+  const resolved = resolve(root)
+  const forbidden = new Set(['/', homedir(), resolve(PKG_DIR), dirname(resolve(PKG_DIR))])
+  if (forbidden.has(resolved) || resolved.split('/').filter(Boolean).length < 3) return { ok: false, message: 'Choose a dedicated workspace folder, never /, your home folder, or the DevKit folder.' }
+  return { ok: true, root: resolved, home: join(resolved, 'moqui-framework') }
+}
+
+function spawnLogged(bin, args, cwd, logFile, env = {}) {
+  return new Promise((resolveRun) => {
+    let fd
+    try {
+      mkdirSync(dirname(logFile), { recursive: true })
+      fd = openSync(logFile, 'a')
+      writeSync(fd, `\n=== ${new Date().toISOString()} ===\n$ ${bin} ${args.join(' ')}\n`)
+    } catch (e) { return resolveRun({ ok: false, code: -1, error: String(e) }) }
+    const child = spawn(bin, args, { cwd, stdio: ['ignore', fd, fd], env: { ...process.env, PATH: `${CONFIG.java11Home}/bin:${SANE_PATH}`, JAVA_HOME: CONFIG.java11Home, ...env } })
+    JOB.pid = child.pid
+    child.on('error', (e) => { try { closeSync(fd) } catch { /* noop */ }; resolveRun({ ok: false, code: -1, error: String(e) }) })
+    child.on('exit', (code) => { try { closeSync(fd) } catch { /* noop */ }; resolveRun({ ok: code === 0, code }) })
+  })
+}
+
+function replaceConfigProperty(xml, name, value) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(<default-property\\s+name="${escaped}"\\s+value=")[^"]*("\\s*/>)`)
+  if (re.test(xml)) return xml.replace(re, `$1${value}$2`)
+  return xml.replace('</moqui-conf>', `    <default-property name="${name}" value="${value}"/>\n</moqui-conf>`)
+}
+
+async function writeBootstrapConfig(home) {
+  const path = join(home, 'runtime', 'conf', 'MoquiDevConf.xml')
+  let xml = await readFile(path, 'utf8')
+  for (const [name, value] of Object.entries({
+    entity_ds_db_conf: SETUP_DB.conf,
+    entity_ds_host: SETUP_DB.host,
+    entity_ds_port: String(SETUP_DB.port),
+    entity_ds_database: SETUP_DB.database,
+    entity_ds_user: SETUP_DB.user,
+    entity_ds_password: SETUP_DB.password,
+  })) xml = replaceConfigProperty(xml, name, value)
+  await writeFile(path, xml)
+}
+
+async function waitForMoqui(port, timeoutMs = 180000) {
+  const until = Date.now() + timeoutMs
+  while (Date.now() < until) {
+    const live = await probe(moquiLivenessUrl(port), 4000)
+    if (live.ok && live.status === 200) return { ok: true, detail: `HTTP ${live.status}` }
+    await delay(2000)
+  }
+  return { ok: false, detail: `No HTTP 200 from ${moquiLivenessUrl(port)} within ${Math.round(timeoutMs / 1000)}s.` }
+}
+
+async function runBootstrap(root) {
+  const job = JOB
+  const checked = bootstrapRootIsSafe(root)
+  if (!checked.ok) { job.ok = false; job.error = checked.message; job.done = true; return }
+  const { home } = checked
+  const logFile = join(root, '.devkit-bootstrap.log')
+  // A bootstrap is intentionally a series of isolated Gradle invocations. This avoids a
+  // leftover daemon or exploded Moqui WAR from a previous partial attempt sharing state
+  // with the next setup stage.
+  const gradleArgs = (...args) => ['--no-daemon', ...args]
+  job.logFile = logFile
+  const command = async (name, bin, args, cwd, env) => {
+    const s = stepStart(name, `${bin} ${args.join(' ')}`)
+    const result = await spawnLogged(bin, args, cwd, logFile, env)
+    if (!result.ok) { stepEnd(s, 'fail', `exit ${result.code}${result.error ? ` · ${result.error}` : ''}`); throw new Error(`${name} failed — see ${logFile}`) }
+    stepEnd(s, 'ok', 'completed')
+  }
+  try {
+    let s = stepStart('Preflight')
+    const [java, git, mysql] = await Promise.all([
+      run(CONFIG.java11, ['-version']), run('git', ['--version']), run('mysql', ['--version']),
+    ])
+    if (java.failed || git.failed || mysql.failed) {
+      const missing = [java.failed && 'JDK 21', git.failed && 'Git', mysql.failed && 'MySQL client'].filter(Boolean).join(', ')
+      stepEnd(s, 'fail', `missing: ${missing}`); throw new Error(`Bootstrap requires ${missing}.`)
+    }
+    if (!(await portOwner(SETUP_DB.port)).listening) {
+      const started = await startMysql()
+      if (!started.ok) { stepEnd(s, 'fail', started.message); throw new Error(started.message) }
+      for (let i = 0; i < 15 && !(await portOwner(SETUP_DB.port)).listening; i++) await delay(1000)
+    }
+    if (!(await portOwner(SETUP_DB.port)).listening) { stepEnd(s, 'fail', 'MySQL is not listening on :3306'); throw new Error('MySQL did not start.') }
+    stepEnd(s, 'ok', `JDK ${CONFIG.java11Home}; Git and MySQL available`)
+
+    const active = await discover()
+    if (active.home && isWithin(active.home, checked.root)) {
+      s = stepStart('Stop existing Moqui')
+      const stopped = await stopMoqui()
+      if (!stopped.ok) { stepEnd(s, 'fail', stopped.message); throw new Error(stopped.message) }
+      stepEnd(s, 'ok', stopped.message)
+    }
+
+    s = stepStart('Wipe workspace', checked.root)
+    await rm(checked.root, { recursive: true, force: true })
+    await mkdir(checked.root, { recursive: true })
+    stepEnd(s, 'ok', 'removed all prior workspace contents')
+
+    await command('Clone moqui-framework', 'git', ['clone', '--branch', 'main', 'https://github.com/hotwax/moqui-framework.git', home], checked.root)
+    // runtime/ is intentionally ignored by the framework checkout. A stale Gradle child can recreate it
+    // between the workspace wipe and this point, so guarantee the clone destination is empty.
+    s = stepStart('Clear runtime clone destination')
+    await rm(join(home, 'runtime'), { recursive: true, force: true })
+    stepEnd(s, 'ok', 'runtime destination is empty')
+    await command('Clone moqui-runtime', 'git', ['clone', '--branch', 'main', 'https://github.com/hotwax/moqui-runtime.git', 'runtime'], home)
+    await command('Clone maarg-docker-config', 'git', ['clone', '--branch', 'main', 'https://github.com/hotwax/hotwax-maarg-docker-config.git', 'runtime/component/maarg-docker-config'], home)
+
+    s = stepStart('Install component manifest')
+    await copyFile(join(home, 'runtime', 'component', 'maarg-docker-config', 'myaddons.xml'), join(home, 'myaddons.xml'))
+    stepEnd(s, 'ok', 'myaddons.xml installed')
+
+    await command('Get OMS component set', './gradlew', gradleArgs('getComponentSet', '-PcomponentSet=oms-suite'), home)
+    await command('Get MySQL JDBC driver', './gradlew', gradleArgs('getMySqlJdbc'), home)
+
+    s = stepStart('Configure local MySQL')
+    const sql = `DROP DATABASE IF EXISTS \`${SETUP_DB.database}\`; CREATE DATABASE \`${SETUP_DB.database}\` CHARACTER SET utf8mb4; CREATE USER IF NOT EXISTS '${SETUP_DB.user}'@'localhost' IDENTIFIED BY '${SETUP_DB.password}'; GRANT ALL ON \`${SETUP_DB.database}\`.* TO '${SETUP_DB.user}'@'localhost'; FLUSH PRIVILEGES;`
+    const db = await run('mysql', ['-u', (CONFIG.db && CONFIG.db.adminUser) || 'root', '-e', sql], 30000, mysqlEnv((CONFIG.db && CONFIG.db.adminPassword) || ''))
+    if (db.failed) { stepEnd(s, 'fail', (db.stderr || db.stdout || `mysql exit ${db.code}`).slice(0, 300)); throw new Error('Could not recreate the local MySQL database and user.') }
+    await writeBootstrapConfig(home)
+    stepEnd(s, 'ok', `${SETUP_DB.database} on ${SETUP_DB.host}:${SETUP_DB.port}`)
+
+    await command('Run OMS setup', './gradlew', gradleArgs('omsSetup', '-PmaargOnly=true'), home)
+    const dbEnv = { entity_ds_db_conf: SETUP_DB.conf, entity_ds_host: SETUP_DB.host, entity_ds_port: String(SETUP_DB.port), entity_ds_database: SETUP_DB.database, entity_ds_user: SETUP_DB.user, entity_ds_password: SETUP_DB.password }
+    await command('Clear temporary Moqui launch files', './gradlew', gradleArgs('cleanTempDir'), home)
+    await command('Load seed + install data', './gradlew', gradleArgs('loadProduction', '-Ptypes=seed,seed-initial,install', '-Praw'), home, dbEnv)
+    await command('Load extension seed data', './gradlew', gradleArgs('loadProduction', '-Ptypes=ext-seed', '-Praw'), home, dbEnv)
+    await command('Load extension data', './gradlew', gradleArgs('loadProduction', '-Ptypes=ext,ext-user', '-Praw'), home, dbEnv)
+    await command('Set up Solr', './gradlew', gradleArgs(':runtime:component:maarg-util:setupSolr', '-PdownloadSolr=true'), home)
+    await command('Start Solr', './gradlew', gradleArgs(':runtime:component:maarg-util:startSolr'), home)
+
+    s = stepStart('Start Moqui')
+    const pid = spawnRun(home, logFile)
+    if (!pid) { stepEnd(s, 'fail', 'could not launch Gradle'); throw new Error('Could not start Moqui.') }
+    job.pid = pid
+    const live = await waitForMoqui(CONFIG.ports.moqui)
+    if (!live.ok) { stepEnd(s, 'fail', live.detail); throw new Error(live.detail) }
+    stepEnd(s, 'ok', live.detail)
+
+    SETTINGS.moquiHome = home
+    SETTINGS.setupWorkspace = checked.root
+    saveSettings(); _moquiHome = null
+    job.receipt = { workspace: checked.root, home, database: SETUP_DB.database, moqui: `http://localhost:${CONFIG.ports.moqui}`, solr: `http://localhost:${CONFIG.ports.solr}/solr/`, note: 'Clean standard OMS suite bootstrapped by DevKit.' }
+    job.ok = true
+  } catch (e) { job.ok = false; job.error = String(e && e.message || e) }
+  finally { job.done = true; job.finishedAt = new Date().toISOString() }
+}
+
+async function apiBootstrapStart(root, confirm) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const checked = bootstrapRootIsSafe(root || setupWorkspace())
+  if (!checked.ok) return { ok: false, message: checked.message }
+  if (String(confirm || '') !== checked.root) return { ok: false, message: `Type the workspace path exactly to confirm its complete deletion: ${checked.root}` }
+  newJob('bootstrap'); runBootstrap(checked.root)
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+// ─── DB: reset-to-seed · snapshot · revert (guarded, localhost only) ──────────
+// devkit stays a stateless orchestrator: snapshots are plain .sql.gz files under the project's
+// own runtime/db-snapshots/ (durable across npx-cache wipes, self-cleaning with the checkout) — the
+// directory listing IS the state. All destructive ops are localhost-only, fail-closed, and show
+// exactly what they did. Secrets are resolved server-side and NEVER sent to the browser or the log.
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', ''])
+const DB_NAME_RE = /^[A-Za-z0-9_]+$/                       // safe to backtick-quote into SQL
+const SNAP_LABEL_RE = /^[A-Za-z0-9_-]{1,64}$/              // safe as a filename segment
+const LOAD_CMD_RE = /^\.\/gradlew [A-Za-z0-9 ,=._-]+$/     // whitelist for the parsed DB_LOAD command
+const MYSQL_CONFS = new Set(['mysql8', 'mysql'])
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`  // single-quote for the one bash -c we use
+const stripXmlComments = (xml) => String(xml || '').replace(/<!--[\s\S]*?-->/g, '')
+const snapshotDir = (home) => join(home, 'runtime', 'db-snapshots')
+
+function isLocalUrl(u) { try { return LOCAL_HOSTS.has(new URL(u).hostname.replace(/^\[|\]$/g, '')) } catch { return false } }
+
+// Minimal JSON-over-HTTP for ES/Solr admin calls (Node 18+ global fetch). Never throws.
+async function httpJson(method, url, body, ms = 8000) {
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms)
+  try {
+    const opt = { method, signal: ac.signal, headers: {} }
+    if (body !== undefined) { opt.body = typeof body === 'string' ? body : JSON.stringify(body); opt.headers['content-type'] = 'application/json' }
+    const r = await fetch(url, opt)
+    let text = ''; try { text = await r.text() } catch { /* ignore */ }
+    let data = null; try { data = text ? JSON.parse(text) : null } catch { /* not json */ }
+    return { ok: true, status: r.status, text, json: data }
+  } catch (e) { return { ok: false, error: e.code || e.name || String(e) } }
+  finally { clearTimeout(t) }
+}
+
+// Byte-offset tail of any file (used to stream the job log). Returns null if unreadable.
+async function tailFile(path, kb = 64) {
+  let fh
+  try {
+    fh = await open(path, 'r'); const { size } = await fh.stat()
+    const len = Math.min(kb * 1024, size); const buf = Buffer.alloc(len)
+    await fh.read(buf, 0, len, size - len)
+    return { size, shown: len, tail: buf.toString('utf8') }
+  } catch { return null } finally { if (fh) await fh.close() }
+}
+
+// ── credential + target resolver (the safety core) ──
+// Identity comes from Moqui's own merged, comment-free MoquiActualConf.xml — NEVER a raw regex over
+// the hand-edited MoquiDevConf.xml (whose mysql8 block is often commented out → a regex would grab a
+// commented password and drop the wrong DB). Password is resolved separately and only used server-side.
+async function resolveDbPassword() {
+  const cfgDb = CONFIG.db || {}
+  if (cfgDb.password != null) return { password: String(cfgDb.password), source: 'devkit.config.json' }
+  if (process.env.entity_ds_password) return { password: process.env.entity_ds_password, source: 'env:entity_ds_password' }
+  if (process.env.MYSQL_PWD) return { password: process.env.MYSQL_PWD, source: 'env:MYSQL_PWD' }
+  const d = await discover()
+  const fromConf = async (rel) => {
+    if (!d.home) return null
+    let xml; try { xml = await readFile(join(d.home, rel), 'utf8') } catch { return null }
+    const vals = [...stripXmlComments(xml).matchAll(/<default-property\s+name="entity_ds_password"\s+value="([^"]*)"/g)]
+      .map((m) => m[1]).filter((v) => v && v !== '***')
+    const uniq = [...new Set(vals)]
+    return uniq.length === 1 ? uniq[0] : null   // 0 or ambiguous → don't guess
+  }
+  let v = await fromConf(join('runtime', 'conf', 'MoquiDevConf.xml'))
+  if (v) return { password: v, source: 'MoquiDevConf.xml' }
+  if (CONFIG.moquiRunScript) {
+    try { const m = (await readFile(CONFIG.moquiRunScript, 'utf8')).match(/entity_ds_password["'=:\s]+([^\s"';]+)/); if (m) return { password: m[1], source: 'run script' } } catch { /* ignore */ }
+  }
+  v = await fromConf(join('runtime', 'conf', 'MoquiProductionConf.xml'))
+  if (v) return { password: v, source: 'MoquiProductionConf.xml' }
+  return { password: '', source: null }
+}
+
+async function resolveDbTarget() {
+  const cfgDb = CONFIG.db || {}
+  const cfg = await apiConfig().catch(() => null)
+  const haveActual = cfg && !cfg.error && cfg.db
+  const id = haveActual ? cfg.db : {}
+  const refuse = (why) => ({ ok: false, refuse: why })
+
+  const dbConf = String(cfgDb.dbConf || id.conf || '').trim()
+  const host = String(cfgDb.host || id.host || '').trim()
+  const port = String(cfgDb.port || id.port || 3306).trim()
+  const database = String(cfgDb.database || id.database || '').trim()
+  const user = String(cfgDb.user || id.user || '').trim()
+  const instance = haveActual ? (cfg.instance && cfg.instance.name) || '' : ''
+
+  if (!haveActual && !(cfgDb.host && cfgDb.database)) return refuse('Moqui has not generated its effective config yet (runtime/log/MoquiActualConf.xml is missing). Start Moqui once, or set "db" in devkit.config.json.')
+  if (!MYSQL_CONFS.has(dbConf)) return refuse(`active datasource is "${dbConf || 'unknown'}", not MySQL — reset/snapshot/revert only support a local MySQL database.`)
+  if (!LOCAL_HOSTS.has(host)) return refuse(`datasource host is "${host}", not localhost — refusing to touch a non-local database.`)
+  if (!DB_NAME_RE.test(database)) return refuse(`database name "${database || '(empty)'}" is not a simple identifier — refusing.`)
+  if (!user) return refuse('could not resolve the database user from MoquiActualConf.xml.')
+
+  const pw = await resolveDbPassword()
+  const adminUser = cfgDb.adminUser ? String(cfgDb.adminUser) : user
+  const adminPassword = cfgDb.adminUser ? String(cfgDb.adminPassword ?? '') : pw.password
+  return {
+    ok: true, dbConf, host: host || 'localhost', port, database, user,
+    password: pw.password, pwSource: pw.source, adminUser, adminPassword, instance,
+    search: (haveActual && cfg.search) || {},
+  }
+}
+
+// mysql/mysqldump auth: password via MYSQL_PWD child env — NEVER argv (visible in ps), never logged.
+function mysqlEnv(password) { return { MYSQL_PWD: password || '' } }
+function mysqlArgs(t, who) { return ['-h', t.host, '-P', String(t.port), '-u', who === 'admin' ? t.adminUser : t.user] }
+
+async function dbPing(t, who = 'user') {
+  const pw = who === 'admin' ? t.adminPassword : t.password
+  const r = await run('mysql', [...mysqlArgs(t, who), '-N', '-B', '-e', 'SELECT 1'], 10000, mysqlEnv(pw))
+  return { ok: !r.failed, error: r.failed ? (r.stderr || `exit ${r.code}`).split('\n')[0].slice(0, 240) : null }
+}
+
+async function dbCounts(t) {
+  // table_rows is approximate for InnoDB — fine for a "what am I about to wipe" preview.
+  const sql = `SELECT COUNT(*), COALESCE(SUM(table_rows),0) FROM information_schema.tables WHERE table_schema='${t.database}'`
+  const r = await run('mysql', [...mysqlArgs(t, 'user'), '-N', '-B', '-e', sql], 15000, mysqlEnv(t.password))
+  if (r.failed) return null
+  const [tables, rows] = (r.stdout.trim().split('\n').pop() || '').split('\t').map((x) => parseInt(x, 10))
+  return { tables: tables || 0, rows: rows || 0 }
+}
+
+async function dropCreateDatabase(t) {
+  const sql = `DROP DATABASE IF EXISTS \`${t.database}\`; CREATE DATABASE \`${t.database}\` CHARACTER SET utf8mb4;`
+  const r = await run('mysql', [...mysqlArgs(t, 'admin'), '-e', sql], 120000, mysqlEnv(t.adminPassword))
+  return { ok: !r.failed, code: r.code, stderr: (r.stderr || '').slice(0, 800) }
+}
+
+// The team's canonical load command, read from maarg-docker-config (compose or Dockerfile). Whitelisted.
+async function resolveLoadCommand() {
+  const d = await discover()
+  const tried = []
+  if (d.home) {
+    const base = join(d.home, 'runtime', 'component', 'maarg-docker-config', 'docker')
+    tried.push(join(base, 'docker-compose.yml'), join(base, 'Dockerfile'))
+  }
+  for (const p of tried) {
+    let txt; try { txt = await readFile(p, 'utf8') } catch { continue }
+    const m = txt.match(/DB_LOAD["']?\s*[:=]\s*["']([^"'\n]+)["']/)
+    if (m) {
+      const cmd = m[1].trim()
+      if (LOAD_CMD_RE.test(cmd)) return { command: cmd, source: p }
+    }
+  }
+  return { command: './gradlew load', source: 'fallback (no valid DB_LOAD found in maarg-docker-config)' }
+}
+
+// ── search index clearing (no Moqui auth — plain local HTTP) ──
+// up:false only on a real connection failure. A reachable-but-401/403 search server is UP but
+// auth-protected (we just can't enumerate/clear without credentials) — never report that as "down".
+const isAuthStatus = (s) => s === 401 || s === 403
+async function esIndices(baseUrl) {
+  const r = await httpJson('GET', baseUrl + '/_cat/indices?format=json&h=index')
+  if (!r.ok) return { up: false, error: r.error }
+  if (r.status >= 200 && r.status < 300 && Array.isArray(r.json)) return { up: true, protected: false, indices: r.json.map((x) => x.index).filter(Boolean) }
+  return { up: true, protected: isAuthStatus(r.status), indices: null, status: r.status }
+}
+async function solrStatus(adminUrl) {
+  const list = await httpJson('GET', adminUrl + '/admin/collections?action=LIST&wt=json')
+  if (list.ok && list.status >= 200 && list.status < 300 && list.json && Array.isArray(list.json.collections)) return { up: true, protected: false, mode: 'cloud', names: list.json.collections }
+  const cores = await httpJson('GET', adminUrl + '/admin/cores?action=STATUS&wt=json')
+  if (cores.ok && cores.status >= 200 && cores.status < 300 && cores.json && cores.json.status) return { up: true, protected: false, mode: 'cores', names: Object.keys(cores.json.status) }
+  if (list.ok || cores.ok) return { up: true, protected: isAuthStatus(list.status) || isAuthStatus(cores.status), names: null, status: list.status || cores.status }
+  return { up: false, error: list.error || cores.error }
+}
+
+async function clearSearch() {
+  const cfg = await apiConfig().catch(() => null)
+  const search = (cfg && !cfg.error && cfg.search) || {}
+  const instance = (cfg && !cfg.error && cfg.instance && cfg.instance.name) || ''
+  const out = { es: null, solr: null }
+
+  // ElasticSearch / OpenSearch — delete the DataDocument indexes (conservative: skip system "." indexes,
+  // and when a prefix/instance is known, only touch matching indexes).
+  const esUrl = (search.elasticsearchUrl || 'http://127.0.0.1:9200').replace(/\/$/, '')
+  if (!isLocalUrl(esUrl)) out.es = { skipped: true, reason: 'non-local ElasticSearch URL — refusing', url: esUrl }
+  else {
+    const es = await esIndices(esUrl)
+    if (!es.up) out.es = { skipped: true, reason: `not reachable (${es.error})`, url: esUrl }
+    else if (!es.indices) out.es = { skipped: true, reason: es.protected ? 'up but auth-protected — cannot clear without credentials' : `unreadable (HTTP ${es.status})`, url: esUrl }
+    else {
+      const prefix = search.elasticsearchPrefix || instance || ''
+      let idxs = es.indices.filter((i) => !i.startsWith('.'))
+      if (prefix) idxs = idxs.filter((i) => i.toLowerCase().startsWith(prefix.toLowerCase()))
+      const deleted = [], failed = []
+      for (const i of idxs) {
+        const r = await httpJson('DELETE', esUrl + '/' + encodeURIComponent(i))
+        if (r.ok && r.status < 300) deleted.push(i); else failed.push(i)
+      }
+      out.es = { url: esUrl, deleted, failed, considered: es.indices.length }
+    }
+  }
+
+  // Solr — empty the instance's collections (delete-by-query keeps the collection; no configset re-upload).
+  const solrUrl = (search.solrAdminUrl || 'http://localhost:8983/solr').replace(/\/$/, '')
+  if (!isLocalUrl(solrUrl)) out.solr = { skipped: true, reason: 'non-local Solr URL — refusing', url: solrUrl }
+  else {
+    const sr = await solrStatus(solrUrl)
+    if (!sr.up) out.solr = { skipped: true, reason: `not reachable (${sr.error})`, url: solrUrl }
+    else if (!sr.names) out.solr = { skipped: true, reason: sr.protected ? 'up but auth-protected — cannot clear without credentials' : `unreadable (HTTP ${sr.status})`, url: solrUrl }
+    else if (!instance) out.solr = { skipped: true, reason: 'instance name unknown — skipped to avoid clearing shared collections', url: solrUrl, found: sr.names }
+    else {
+      const targets = sr.names.filter((c) => c === instance || c.toLowerCase().startsWith(instance.toLowerCase()))
+      const cleared = [], failed = []
+      for (const c of targets) {
+        const r = await httpJson('POST', `${solrUrl}/${encodeURIComponent(c)}/update?commit=true`, { delete: { query: '*:*' } })
+        if (r.ok && r.status < 300) cleared.push(c); else failed.push(c)
+      }
+      out.solr = { url: solrUrl, cleared, failed, skippedCollections: sr.names.filter((c) => !targets.includes(c)) }
+    }
+  }
+  return out
+}
+function summarizeSearch(s) {
+  const es = s.es && s.es.deleted ? `ES: cleared ${s.es.deleted.length} index(es)` : `ES: ${s.es && s.es.reason || 'n/a'}`
+  const solr = s.solr && s.solr.cleared ? `Solr: emptied ${s.solr.cleared.length} collection(s)` : `Solr: ${s.solr && s.solr.reason || 'n/a'}`
+  return `${es} · ${solr}`
+}
+
+// ── pipes (Node stdio, no shell): mysqldump|gzip→file and gunzip|mysql ──
+function dumpToFile(t, outPath) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, PATH: SANE_PATH, ...mysqlEnv(t.password) }
+    const out = createWriteStream(outPath)
+    const dump = spawn('mysqldump', ['--single-transaction', '--no-tablespaces', '--set-gtid-purged=OFF', '--column-statistics=0', ...mysqlArgs(t, 'user'), t.database], { env })
+    const gz = spawn('gzip', [], { env })
+    let derr = '', gerr = '', dc = null, gc = null, oc = false, done = false
+    const fin = () => { if (done || dc === null || gc === null || !oc) return; done = true; resolve({ ok: dc === 0 && gc === 0, dumpCode: dc, gzCode: gc, stderr: (derr || gerr).slice(0, 1200) }) }
+    dump.stderr.on('data', (d) => { derr += d.toString().slice(0, 4000) })
+    gz.stderr.on('data', (d) => { gerr += d.toString().slice(0, 2000) })
+    dump.stdout.pipe(gz.stdin); gz.stdout.pipe(out)
+    dump.on('error', (e) => { derr += String(e); dc = dc ?? -1; try { gz.stdin.end() } catch { /* */ } fin() })
+    gz.on('error', (e) => { gerr += String(e); gc = gc ?? -1; fin() })
+    dump.on('close', (c) => { dc = c })
+    gz.on('close', (c) => { gc = c; fin() })
+    out.on('close', () => { oc = true; fin() })
+    out.on('error', (e) => { gerr += String(e); gc = gc ?? -1; oc = true; fin() })
+  })
+}
+function restoreFromFile(t, file) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, PATH: SANE_PATH, ...mysqlEnv(t.password) }
+    const gun = spawn('gunzip', ['-c', file], { env })
+    const my = spawn('mysql', [...mysqlArgs(t, 'user'), t.database], { env })
+    let gerr = '', merr = '', gc = null, mc = null, done = false
+    const fin = () => { if (done || gc === null || mc === null) return; done = true; resolve({ ok: gc === 0 && mc === 0, gunzipCode: gc, mysqlCode: mc, stderr: (merr || gerr).slice(0, 1200) }) }
+    gun.stderr.on('data', (d) => { gerr += d.toString().slice(0, 2000) })
+    my.stderr.on('data', (d) => { merr += d.toString().slice(0, 4000) })
+    gun.stdout.pipe(my.stdin)
+    gun.on('error', (e) => { gerr += String(e); gc = gc ?? -1; try { my.stdin.end() } catch { /* */ } fin() })
+    my.on('error', (e) => { merr += String(e); mc = mc ?? -1; fin() })
+    gun.on('close', (c) => { gc = c })
+    my.on('close', (c) => { mc = c; fin() })
+  })
+}
+
+async function ensureSnapshotDir(home) {
+  const dir = snapshotDir(home)
+  await mkdir(dir, { recursive: true })
+  const gi = join(dir, '.gitignore')   // dir is NOT covered by moqui-runtime/.gitignore — keep dumps out of git
+  if (!existsSync(gi)) { try { writeFileSync(gi, '# devkit DB snapshots — never commit\n*\n') } catch { /* */ } }
+  return dir
+}
+
+// ── job model: one global current job, spawned long ops, status by poll ──
+let JOB = null
+function newJob(kind) {
+  JOB = { id: 'job-' + Date.now(), kind, phase: 'starting', steps: [], pid: null, logFile: null, startedAt: new Date().toISOString(), finishedAt: null, done: false, ok: null, error: null, receipt: null }
+  return JOB
+}
+function stepStart(name, detail) { const s = { name, status: 'running', detail: detail || '', startedAt: Date.now() }; JOB.steps.push(s); JOB.phase = name; return s }
+function stepEnd(s, status, detail) { s.status = status; if (detail !== undefined) s.detail = detail; s.ms = Date.now() - s.startedAt }
+
+// Run the gradle load detached to a logfile (it streams for minutes). entity_ds_* are passed via the
+// CHILD ENV (not argv/log) so the password never leaks and the load targets the exact DB we wiped.
+function spawnLoad(home, loadCommand, logFile, t) {
+  return new Promise((resolve) => {
+    let fd
+    try { mkdirSync(dirname(logFile), { recursive: true }); fd = openSync(logFile, 'a'); writeSync(fd, `\n=== devkit ${JOB.kind} · load · ${new Date().toISOString()} ===\n$ ${loadCommand}\n`) } catch (e) { return resolve({ ok: false, code: -1, error: String(e) }) }
+    const env = {
+      ...process.env, PATH: `${CONFIG.java11Home}/bin:${SANE_PATH}`, JAVA_HOME: CONFIG.java11Home,
+      entity_ds_db_conf: t.dbConf, entity_ds_host: t.host, entity_ds_port: String(t.port),
+      entity_ds_database: t.database, entity_ds_user: t.user, entity_ds_password: t.password,
+    }
+    const child = spawn('bash', ['-c', `cd ${shq(home)} && exec ${loadCommand}`], { detached: true, stdio: ['ignore', fd, fd], env })
+    JOB.pid = child.pid
+    child.on('error', (e) => { try { closeSync(fd) } catch { /* */ } resolve({ ok: false, code: -1, error: String(e) }) })
+    child.on('exit', (code) => { try { closeSync(fd) } catch { /* */ } resolve({ ok: code === 0, code }) })
+  })
+}
+
+async function stopMoquiForJob(s) {
+  const mport = (await discover()).httpPort || CONFIG.ports.moqui
+  const wasUp = (await portOwner(mport)).listening
+  if (!wasUp) { stepEnd(s, 'skip', `nothing on :${mport}`); return { wasUp: false } }
+  const stop = await stopMoqui()
+  if (!stop.ok) { stepEnd(s, 'fail', stop.message); throw new Error('Moqui would not stop: ' + stop.message + ' — aborting before touching the database.') }
+  const o = await portOwner(mport)
+  if (o.listening) { stepEnd(s, 'fail', `:${mport} still held by pid ${o.pid}`); throw new Error('Moqui is still running after stop — aborting before DROP.') }
+  stepEnd(s, 'ok', stop.message)
+  return { wasUp: true }
+}
+
+async function runReset() {
+  const job = JOB
+  try {
+    let s = stepStart('Resolve & verify target')
+    const t = await resolveDbTarget()
+    if (!t.ok) { stepEnd(s, 'fail', t.refuse); throw new Error(t.refuse) }                 // TOCTOU: re-resolved here, not trusted from confirm-time
+    const ping = await dbPing(t, 'admin')
+    if (!ping.ok) { stepEnd(s, 'fail', ping.error); throw new Error(`cannot connect as "${t.adminUser}": ${ping.error}. Set db.password (or db.adminUser/adminPassword) in devkit.config.json.`) }
+    stepEnd(s, 'ok', `${t.database} @ ${t.host}:${t.port} (user ${t.user})`)
+    const d = await discover(); if (!d.home) throw new Error('No MOQUI_HOME.')
+
+    const { wasUp } = await stopMoquiForJob(stepStart('Stop Moqui'))
+
+    s = stepStart('Drop + create database')
+    const dc = await dropCreateDatabase(t)
+    if (!dc.ok) { stepEnd(s, 'fail', `mysql exit ${dc.code}: ${dc.stderr}`); throw new Error('DROP/CREATE failed — the database may now be missing. ' + dc.stderr) }
+    stepEnd(s, 'ok', `recreated \`${t.database}\``)
+
+    const load = await resolveLoadCommand()
+    s = stepStart('Load base data', load.command)
+    job.logFile = join(d.home, 'runtime', 'log', 'devkit-db-job.log')
+    const res = await spawnLoad(d.home, load.command, job.logFile, t)
+    if (!res.ok) { stepEnd(s, 'fail', `gradle exit ${res.code}${res.error ? ' · ' + res.error : ''}`); throw new Error(`Load failed (exit ${res.code}) — the database is only partially loaded; re-run reset. See the job log.`) }
+    stepEnd(s, 'ok', 'base data loaded')
+
+    s = stepStart('Clear search index')
+    const search = await clearSearch(); stepEnd(s, 'ok', summarizeSearch(search))
+
+    s = stepStart('Restart Moqui')
+    let restartMsg = 'was not running before reset'
+    if (wasUp) { const st = await startMoqui(); stepEnd(s, st.ok ? 'ok' : 'fail', st.message); restartMsg = st.message } else stepEnd(s, 'skip', restartMsg)
+
+    job.receipt = { db: t.database, host: t.host, load: load.command, loadSource: load.source, search, restarted: wasUp, restartMsg, note: 'Search was cleared. ES auto-reindexes on restart for DataFeeds with indexOnStartEmpty=Y; Solr stays empty until reindexed.' }
+    job.ok = true
+  } catch (e) { job.ok = false; job.error = String(e && e.message || e) }
+  finally { job.done = true; job.finishedAt = new Date().toISOString() }
+}
+
+async function runRevert(file) {
+  const job = JOB
+  try {
+    const d = await discover(); if (!d.home) throw new Error('No MOQUI_HOME.')
+    const dir = snapshotDir(d.home)
+    if (basename(file) !== file || !file.endsWith('.sql.gz')) throw new Error('Invalid snapshot reference.')
+    const full = join(dir, file)
+    if (dirname(full) !== dir || !existsSync(full)) throw new Error('Snapshot not found: ' + file)
+
+    let s = stepStart('Verify snapshot integrity')
+    if ((await run('gzip', ['-t', full], 120000)).failed) { stepEnd(s, 'fail', 'archive is corrupt'); throw new Error('Snapshot failed its gzip integrity check — aborting; your current database is untouched.') }
+    stepEnd(s, 'ok', 'gzip -t passed')
+
+    s = stepStart('Resolve & verify target')
+    const t = await resolveDbTarget()
+    if (!t.ok) { stepEnd(s, 'fail', t.refuse); throw new Error(t.refuse) }
+    const ping = await dbPing(t, 'admin')
+    if (!ping.ok) { stepEnd(s, 'fail', ping.error); throw new Error(`cannot connect as "${t.adminUser}": ${ping.error}.`) }
+    stepEnd(s, 'ok', `${t.database} @ ${t.host}:${t.port}`)
+
+    const { wasUp } = await stopMoquiForJob(stepStart('Stop Moqui'))
+
+    s = stepStart('Drop + create database')
+    const dc = await dropCreateDatabase(t)
+    if (!dc.ok) { stepEnd(s, 'fail', `mysql exit ${dc.code}: ${dc.stderr}`); throw new Error('DROP/CREATE failed. ' + dc.stderr) }
+    stepEnd(s, 'ok', `recreated \`${t.database}\``)
+
+    s = stepStart('Restore snapshot')
+    const r = await restoreFromFile(t, full)
+    if (!r.ok) { stepEnd(s, 'fail', `gunzip ${r.gunzipCode} / mysql ${r.mysqlCode}: ${r.stderr}`); throw new Error('Restore failed — the database is only partially restored. ' + r.stderr) }
+    stepEnd(s, 'ok', 'data restored from snapshot')
+
+    s = stepStart('Clear search index')
+    const search = await clearSearch(); stepEnd(s, 'ok', summarizeSearch(search))
+
+    s = stepStart('Restart Moqui')
+    let restartMsg = 'was not running before revert'
+    if (wasUp) { const st = await startMoqui(); stepEnd(s, st.ok ? 'ok' : 'fail', st.message); restartMsg = st.message } else stepEnd(s, 'skip', restartMsg)
+
+    job.receipt = { db: t.database, host: t.host, restoredFrom: file, search, restarted: wasUp, restartMsg, note: 'Search cleared to match the restored DB. ES rebuilds on restart (indexOnStartEmpty); if you use Solr, trigger your reindex.' }
+    job.ok = true
+  } catch (e) { job.ok = false; job.error = String(e && e.message || e) }
+  finally { job.done = true; job.finishedAt = new Date().toISOString() }
+}
+
+async function runSnapshot(label) {
+  const job = JOB
+  try {
+    const t = await resolveDbTarget(); if (!t.ok) throw new Error(t.refuse)
+    const ping = await dbPing(t, 'user'); if (!ping.ok) throw new Error(`cannot connect as "${t.user}": ${ping.error}. Set db.password in devkit.config.json.`)
+    const d = await discover(); if (!d.home) throw new Error('No MOQUI_HOME.')
+    let s = stepStart('Preflight')
+    if ((await run('mysqldump', ['--version'])).failed) { stepEnd(s, 'fail', 'mysqldump not on PATH'); throw new Error('mysqldump not found on PATH.') }
+    const dir = await ensureSnapshotDir(d.home); stepEnd(s, 'ok', dir)
+
+    s = stepStart('Dump + compress', `${t.database} → ${label}`)
+    const base = `${label}__${new Date().toISOString().replace(/[:.]/g, '-')}`
+    const finalPath = join(dir, base + '.sql.gz'); const partPath = finalPath + '.partial'
+    const res = await dumpToFile(t, partPath)
+    if (!res.ok) { try { await unlink(partPath) } catch { /* */ } stepEnd(s, 'fail', `mysqldump ${res.dumpCode}/gzip ${res.gzCode}: ${res.stderr}`); throw new Error('mysqldump failed; partial file removed. ' + res.stderr) }
+    if ((await run('gzip', ['-t', partPath], 120000)).failed) { try { await unlink(partPath) } catch { /* */ } stepEnd(s, 'fail', 'integrity check failed'); throw new Error('Snapshot failed gzip -t; removed.') }
+    await rename(partPath, finalPath)                                  // atomic: only a verified dump becomes "final"
+    const st = await stat(finalPath)
+    const gitBranch = (await run('git', ['-C', d.home, 'rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim() || null
+    const gitSha = (await run('git', ['-C', d.home, 'rev-parse', '--short', 'HEAD'])).stdout.trim() || null
+    const meta = { label, file: base + '.sql.gz', db: t.database, host: t.host, created: new Date().toISOString(), bytes: st.size, gitBranch, gitSha }
+    try { writeFileSync(join(dir, base + '.json'), JSON.stringify(meta, null, 2)) } catch { /* sidecar is best-effort */ }
+    stepEnd(s, 'ok', `${(st.size / 1048576).toFixed(2)} MB`)
+    job.receipt = meta; job.ok = true
+  } catch (e) { job.ok = false; job.error = String(e && e.message || e) }
+  finally { job.done = true; job.finishedAt = new Date().toISOString() }
+}
+
+// ── DB endpoints ──
+async function apiDbTarget() {
+  const t = await resolveDbTarget()
+  const load = await resolveLoadCommand()
+  if (!t.ok) return { ok: false, refuse: t.refuse, loadCommand: load.command, loadSource: load.source }
+  const ping = await dbPing(t, 'user')
+  const counts = ping.ok ? await dbCounts(t).catch(() => null) : null
+  // non-destructive search detection
+  const cfg = await apiConfig().catch(() => null)
+  const search = (cfg && !cfg.error && cfg.search) || {}
+  const esUrl = (search.elasticsearchUrl || 'http://127.0.0.1:9200').replace(/\/$/, '')
+  const solrUrl = (search.solrAdminUrl || 'http://localhost:8983/solr').replace(/\/$/, '')
+  const es = await esIndices(esUrl)
+  const solr = await solrStatus(solrUrl)
+  return {
+    ok: true, dbConf: t.dbConf, host: t.host, port: t.port, database: t.database, user: t.user,
+    adminUser: t.adminUser !== t.user ? t.adminUser : undefined,
+    hasPassword: !!t.password, pwSource: t.pwSource, connect: ping, counts,
+    loadCommand: load.command, loadSource: load.source, instance: t.instance,
+    search: {
+      es: es.up ? { url: esUrl, up: true, protected: !!es.protected, indexCount: es.indices ? es.indices.filter((i) => !i.startsWith('.')).length : null } : { url: esUrl, up: false },
+      solr: solr.up ? { url: solrUrl, up: true, protected: !!solr.protected, collectionCount: solr.names ? solr.names.length : null } : { url: solrUrl, up: false },
+    },
+    snapshotDir: snapshotDir((await discover()).home || ''),
+  }
+}
+
+async function apiSnapshotList() {
+  const d = await discover(); if (!d.home) return { dir: null, snapshots: [] }
+  const dir = snapshotDir(d.home)
+  let names = []; try { names = await readdir(dir) } catch { return { dir, snapshots: [] } }
+  const snaps = []
+  for (const n of names) {
+    if (!n.endsWith('.sql.gz')) continue
+    const full = join(dir, n); let st; try { st = await stat(full) } catch { continue }
+    const base = n.replace(/\.sql\.gz$/, ''); let meta = null
+    try { meta = JSON.parse(await readFile(join(dir, base + '.json'), 'utf8')) } catch { /* no sidecar */ }
+    const us = base.indexOf('__')
+    snaps.push({ file: n, label: us >= 0 ? base.slice(0, us) : base, createdAt: (meta && meta.created) || st.mtime.toISOString(), bytes: st.size, db: meta && meta.db, gitBranch: meta && meta.gitBranch, gitSha: meta && meta.gitSha, complete: !!meta })
+  }
+  snaps.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+  return { dir, snapshots: snaps }
+}
+
+async function apiJob() {
+  if (!JOB) return { job: null }
+  const job = { ...JOB }                              // JOB never holds a password — safe to return
+  if (JOB.logFile) { const t = await tailFile(JOB.logFile, 64); if (t) job.logTail = t.tail }
+  return { job }
+}
+
+function jobBusy() { return JOB && !JOB.done ? `A ${JOB.kind} job is already running — wait for it to finish.` : null }
+
+async function apiSnapshotStart(label) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  label = String(label || '').trim()
+  if (!SNAP_LABEL_RE.test(label)) return { ok: false, message: 'Label must be 1–64 characters: letters, numbers, _ or - (no spaces, dots, or slashes).' }
+  const t = await resolveDbTarget(); if (!t.ok) return { ok: false, message: t.refuse }
+  newJob('snapshot'); runSnapshot(label)
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+async function apiResetStart(confirm) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const t = await resolveDbTarget(); if (!t.ok) return { ok: false, message: t.refuse }
+  if (String(confirm || '') !== t.database) return { ok: false, message: `Type the database name "${t.database}" exactly to confirm the reset.` }
+  newJob('reset'); runReset()
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+async function apiRevertStart(snapshot, confirm) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const t = await resolveDbTarget(); if (!t.ok) return { ok: false, message: t.refuse }
+  if (String(confirm || '') !== t.database) return { ok: false, message: `Type the database name "${t.database}" exactly to confirm the revert (this permanently replaces your current data).` }
+  const file = String(snapshot || '')
+  if (basename(file) !== file || !file.endsWith('.sql.gz')) return { ok: false, message: 'Invalid snapshot reference.' }
+  const d = await discover(); if (!d.home || !existsSync(join(snapshotDir(d.home), file))) return { ok: false, message: 'Snapshot not found.' }
+  newJob('revert'); runRevert(file)
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+// ─── environment cloning: git-worktree based, own MySQL DB + port (localhost only) ──────────────
+// Automates the proven local pattern (cf. moqui-products-dev): a self-contained env is git worktrees
+// of the framework + runtime + each component, with its own runtime/conf overrides (port, DB, instance)
+// and its own MySQL database. Stateless: envs are discovered by scanning CONFIG.envsDir.
+
+const ENV_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,30}$/
+
+async function gitRoot(dir) { const r = await run('git', ['-C', dir, 'rev-parse', '--show-toplevel']); return r.failed ? null : r.stdout.trim() }
+async function gitHead(repo) { const r = await run('git', ['-C', repo, 'rev-parse', 'HEAD']); return r.failed ? null : r.stdout.trim() }
+// The SOURCE repo backing a worktree (its main checkout) — needed to remove the worktree and delete its
+// branch from the right place. --show-toplevel returns the worktree's own dir, which is wrong for that.
+async function sourceRepoOf(dir) {
+  const r = await run('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.failed) return null
+  const common = r.stdout.trim()                        // e.g. /Users/.../oms/.git
+  return common.endsWith('/.git') ? dirname(common) : (await gitRoot(dir))
+}
+
+async function freeMoquiPort() {
+  for (let p = 8082; p <= 8099; p++) { if (!(await portOwner(p)).listening) return p }
+  return null
+}
+
+// Read a few default-property values (comment-stripped) from a conf file.
+async function readConfProps(confPath, names) {
+  const out = {}
+  let xml = ''
+  try { xml = stripXmlComments(await readFile(confPath, 'utf8')) } catch { return out }
+  for (const n of names) {
+    const m = xml.match(new RegExp(`name="${n.replace(/[.\\]/g, '\\$&')}"\\s+value="([^"]*)"`))
+    out[n] = m ? m[1] : ''
+  }
+  return out
+}
+
+// All cloned environments under CONFIG.envsDir (each subdir with runtime/conf/MoquiDevConf.xml is one).
+async function discoverEnvs() {
+  const dir = CONFIG.envsDir
+  let names = []
+  try { names = await readdir(dir) } catch { return { dir, envs: [] } }
+  const instances = await discoverInstances()
+  const active = await discover()
+  const envs = []
+  for (const name of names.sort()) {
+    if (name.startsWith('.')) continue
+    const home = join(dir, name)
+    const confPath = join(home, 'runtime', 'conf', 'MoquiDevConf.xml')
+    if (!existsSync(confPath)) continue
+    const p = await readConfProps(confPath, ['webapp_http_port', 'entity_ds_database', 'entity_ds_db_conf', 'ofbiz.instance.name'])
+    const port = Number(p.webapp_http_port) || null
+    const inst = instances.find((i) => samePath(i.home, home) || (port && i.port === port))
+    envs.push({
+      name, home, port, db: p.entity_ds_database || '', dbConf: p.entity_ds_db_conf || '', instance: p['ofbiz.instance.name'] || name,
+      running: !!inst, pid: inst ? inst.pid : null, active: samePath(home, active.home),
+    })
+  }
+  envs.sort((a, b) => (a.port || 0) - (b.port || 0))
+  return { dir, envs }
+}
+async function apiEnvs() { return discoverEnvs() }
+
+// Resolve the source env's repos + current commits to worktree from.
+async function envSourceLayout(srcHome) {
+  const framework = await gitRoot(srcHome)
+  let runtimeReal = srcHome
+  try { runtimeReal = await realpath(join(srcHome, 'runtime')) } catch { /* */ }
+  const runtime = await gitRoot(runtimeReal)
+  const components = []
+  let names = []
+  try { names = await readdir(join(runtimeReal, 'component')) } catch { /* */ }
+  for (const n of names.sort()) {
+    if (n === 'README' || n.startsWith('.')) continue
+    let target = join(runtimeReal, 'component', n)
+    try { target = await realpath(target) } catch { /* */ }
+    const repo = await gitRoot(target)
+    if (repo) components.push({ name: n, repo, head: await gitHead(repo) })
+  }
+  return { framework, frameworkHead: await gitHead(framework), runtime, runtimeHead: await gitHead(runtime), runtimeReal, components }
+}
+
+// git worktree add (new branch env/<name>; fall back to detached if the branch already exists).
+async function addWorktree(repo, dest, head, branch) {
+  let r = await run('git', ['-C', repo, 'worktree', 'add', '-b', branch, dest, head], 120000)
+  if (r.failed) r = await run('git', ['-C', repo, 'worktree', 'add', '--detach', dest, head], 120000)
+  return { ok: !r.failed, error: r.failed ? (r.stderr || `exit ${r.code}`).slice(0, 300) : null }
+}
+
+async function cleanRuntimeData(envHome) {
+  for (const d of ['log', 'elasticsearch', 'db', 'txlog', 'tmp', 'sessions']) {
+    try { await rm(join(envHome, 'runtime', d), { recursive: true, force: true }) } catch { /* */ }
+  }
+}
+
+// Inject the env's self-contained datasource + port + instance overrides into its MoquiDevConf.xml.
+async function writeEnvConf(envHome, { port, db, instance, t }) {
+  const confPath = join(envHome, 'runtime', 'conf', 'MoquiDevConf.xml')
+  let xml
+  try { xml = await readFile(confPath, 'utf8') } catch (e) { throw new Error(`env conf missing at ${confPath} (${e.code})`) }
+  const block =
+`    <!-- devkit-managed env "${instance}": own port, MySQL database, and instance name -->
+    <default-property name="webapp_http_port" value="${port}"/>
+    <default-property name="ofbiz.instance.name" value="${instance}"/>
+    <default-property name="entity_ds_db_conf" value="mysql8"/>
+    <default-property name="entity_ds_host" value="${t.host}"/>
+    <default-property name="entity_ds_port" value="${t.port}"/>
+    <default-property name="entity_ds_database" value="${db}"/>
+    <default-property name="entity_ds_user" value="${t.user}"/>
+    <default-property name="entity_ds_password" value="${t.password}"/>
+`
+  const i = xml.indexOf('<default-property')
+  if (i >= 0) { const ls = xml.lastIndexOf('\n', i) + 1; xml = xml.slice(0, ls) + block + xml.slice(ls) }
+  else xml = xml.replace('</moqui-conf>', block + '</moqui-conf>')
+  writeFileSync(confPath, xml)
+}
+
+// mysqldump <src> | mysql <dst> — copy a database wholesale (Node stdio pipe, MYSQL_PWD env, no shell).
+function copyDatabase(srcT, dstT) {
+  return new Promise((resolve) => {
+    const dump = spawn('mysqldump', ['--single-transaction', '--no-tablespaces', '--set-gtid-purged=OFF', '--column-statistics=0', ...mysqlArgs(srcT, 'user'), srcT.database], { env: { ...process.env, PATH: SANE_PATH, ...mysqlEnv(srcT.password) } })
+    const load = spawn('mysql', [...mysqlArgs(dstT, 'user'), dstT.database], { env: { ...process.env, PATH: SANE_PATH, ...mysqlEnv(dstT.password) } })
+    let derr = '', lerr = '', dc = null, lc = null, done = false
+    const fin = () => { if (done || dc === null || lc === null) return; done = true; resolve({ ok: dc === 0 && lc === 0, dumpCode: dc, loadCode: lc, stderr: (lerr || derr).slice(0, 1200) }) }
+    dump.stderr.on('data', (d) => { derr += d.toString().slice(0, 4000) })
+    load.stderr.on('data', (d) => { lerr += d.toString().slice(0, 4000) })
+    dump.stdout.pipe(load.stdin)
+    dump.on('error', (e) => { derr += String(e); dc = dc ?? -1; try { load.stdin.end() } catch { /* */ } fin() })
+    load.on('error', (e) => { lerr += String(e); lc = lc ?? -1; fin() })
+    dump.on('close', (c) => { dc = c })
+    load.on('close', (c) => { lc = c; fin() })
+  })
+}
+
+// Boot a cloned env: gradlew run from its home (port + DB come from its own conf). Detached; not awaited.
+function spawnRun(envHome, logFile) {
+  let fd
+  try { mkdirSync(dirname(logFile), { recursive: true }); fd = openSync(logFile, 'a'); writeSync(fd, `\n=== devkit env boot · ${new Date().toISOString()} ===\n`) } catch { return null }
+  const env = { ...process.env, PATH: `${CONFIG.java11Home}/bin:${SANE_PATH}`, JAVA_HOME: CONFIG.java11Home }
+  const child = spawn('bash', ['-c', `cd ${shq(envHome)} && exec ./gradlew --no-daemon run`], { detached: true, stdio: ['ignore', fd, fd], env })
+  child.unref()
+  return child.pid
+}
+
+async function runCreateEnv({ name, dbMode, boot }) {
+  const job = JOB
+  try {
+    name = String(name || '').trim()
+    if (!ENV_NAME_RE.test(name)) throw new Error('Name must be 1–31 chars: lowercase letters, numbers, _ or - (starting alphanumeric).')
+    await mkdir(CONFIG.envsDir, { recursive: true })
+    const envHome = join(CONFIG.envsDir, name)
+    if (existsSync(envHome)) throw new Error(`An environment named "${name}" already exists at ${envHome}.`)
+
+    let s = stepStart('Resolve source environment')
+    const srcT = await resolveDbTarget()
+    if (!srcT.ok) throw new Error(`source must be a local MySQL environment — ${srcT.refuse}`)
+    const srcHome = (await discover()).home
+    if (!srcHome) throw new Error('No source environment home resolved.')
+    const layout = await envSourceLayout(srcHome)
+    if (!layout.framework || !layout.runtime) throw new Error('Source framework/runtime are not git repositories — cannot worktree.')
+    stepEnd(s, 'ok', `${name} ← ${srcHome} (${layout.components.length} components)`)
+
+    const port = await freeMoquiPort()
+    if (!port) throw new Error('No free port in 8082–8099 for the new environment.')
+    const db = `${srcT.database}_${name}`.replace(/[^A-Za-z0-9_]/g, '_')
+    const branch = `env/${name}`
+    const envT = { ...srcT, database: db }
+
+    s = stepStart('Create git worktrees', `branch ${branch}`)
+    const comps = []
+    const fw = await addWorktree(layout.framework, envHome, layout.frameworkHead, branch)
+    if (!fw.ok) throw new Error(`framework worktree failed: ${fw.error}`)
+    try { if (existsSync(join(envHome, 'runtime'))) await rm(join(envHome, 'runtime'), { recursive: true, force: true }) } catch { /* */ }
+    const rt = await addWorktree(layout.runtime, join(envHome, 'runtime'), layout.runtimeHead, branch)
+    if (!rt.ok) throw new Error(`runtime worktree failed: ${rt.error}`)
+    for (const c of layout.components) {
+      const w = await addWorktree(c.repo, join(envHome, 'runtime', 'component', c.name), c.head, branch)
+      comps.push({ name: c.name, ok: w.ok, error: w.error })
+    }
+    const failed = comps.filter((c) => !c.ok)
+    stepEnd(s, failed.length ? 'warn' : 'ok', `framework + runtime + ${comps.length - failed.length}/${comps.length} components${failed.length ? ` (failed: ${failed.map((c) => c.name).join(', ')})` : ''}`)
+
+    // Components keep their resolved dependency jars in a gitignored lib/ — worktrees don't carry it, and
+    // Moqui builds the cross-component classpath from lib/*.jar at config time, so without it components
+    // fail to compile. COW-clone each source lib/ into the env (APFS cp -c → fast, space-shared).
+    s = stepStart('Clone component dependencies (lib/)')
+    let libs = 0
+    for (const c of layout.components) {
+      const srcLib = join(c.repo, 'lib')
+      if (!existsSync(srcLib)) continue
+      const r = await run('cp', ['-cR', srcLib, join(envHome, 'runtime', 'component', c.name, 'lib')], 180000)
+      if (!r.failed) libs++
+    }
+    stepEnd(s, 'ok', `${libs} component lib/ dirs cloned (copy-on-write)`)
+
+    s = stepStart('Write env config + clean runtime')
+    await writeEnvConf(envHome, { port, db, instance: name, t: envT })
+    await cleanRuntimeData(envHome)
+    stepEnd(s, 'ok', `:${port} · db ${db} · instance ${name}`)
+
+    s = stepStart('Create database', `${db} (${dbMode})`)
+    const adminUser = srcT.adminUser, adminPw = srcT.adminPassword
+    const ddl = `CREATE DATABASE IF NOT EXISTS \`${db}\` CHARACTER SET utf8mb4; GRANT ALL ON \`${db}\`.* TO '${srcT.user}'@'localhost'; FLUSH PRIVILEGES;`
+    const cr = await run('mysql', ['-h', srcT.host, '-P', String(srcT.port), '-u', adminUser, '-e', ddl], 60000, mysqlEnv(adminPw))
+    if (cr.failed) {
+      const hint = /access denied/i.test(cr.stderr) ? ` — user "${adminUser}" cannot CREATE a new database. Set db.adminUser/db.adminPassword (e.g. root) in devkit.config.json.` : ''
+      stepEnd(s, 'fail', (cr.stderr || '').slice(0, 300)); throw new Error('CREATE DATABASE failed: ' + (cr.stderr || '').slice(0, 200) + hint)
+    }
+    stepEnd(s, 'ok', `created ${db}`)
+
+    if (dbMode === 'copy') {
+      s = stepStart('Copy source data', `${srcT.database} → ${db}`)
+      const cp = await copyDatabase(srcT, envT)
+      if (!cp.ok) { stepEnd(s, 'fail', `mysqldump ${cp.dumpCode}/mysql ${cp.loadCode}: ${cp.stderr}`); throw new Error('DB copy failed: ' + cp.stderr) }
+      stepEnd(s, 'ok', 'data copied')
+    } else if (dbMode === 'fresh') {
+      s = stepStart('Load base data (builds the env)', 'gradle — may take minutes')
+      job.logFile = join(envHome, 'runtime', 'log', 'devkit-db-job.log')
+      const load = await resolveLoadCommand()
+      const res = await spawnLoad(envHome, load.command, job.logFile, envT)
+      if (!res.ok) { stepEnd(s, 'fail', `gradle exit ${res.code}`); throw new Error(`Base-data load failed (exit ${res.code}). See the job log.`) }
+      stepEnd(s, 'ok', 'base data loaded')
+    } else {
+      stepStart('Database contents'); stepEnd(JOB.steps[JOB.steps.length - 1], 'skip', 'empty — Moqui will populate on first boot')
+    }
+
+    let booted = false
+    if (boot) {
+      s = stepStart('Boot environment', `gradlew run on :${port}`)
+      job.logFile = join(envHome, 'runtime', 'log', 'devkit-db-job.log')
+      const pid = spawnRun(envHome, job.logFile)
+      booted = !!pid
+      stepEnd(s, booted ? 'ok' : 'fail', booted ? `building + starting (pid ${pid}); first build takes a few minutes — watch :${port}` : 'failed to launch')
+    }
+
+    job.receipt = { name, home: envHome, port, db, dbMode, instance: name, components: comps, booted, source: srcHome, note: boot ? `Building + booting on :${port}. First gradle build takes several minutes; it appears live in the picker when ready.` : `Created (stopped). Start it from the environment list.` }
+    job.ok = true
+  } catch (e) { job.ok = false; job.error = String(e && e.message || e) }
+  finally { job.done = true; job.finishedAt = new Date().toISOString() }
+}
+
+async function runDeleteEnv(name) {
+  const job = JOB
+  try {
+    const home = join(CONFIG.envsDir, name)
+    if (!existsSync(home)) throw new Error(`No environment "${name}".`)
+    const confPath = join(home, 'runtime', 'conf', 'MoquiDevConf.xml')
+    const p = await readConfProps(confPath, ['webapp_http_port', 'entity_ds_database'])
+    const port = Number(p.webapp_http_port) || null
+    const db = p.entity_ds_database || ''
+
+    let s = stepStart('Stop environment')
+    if (port && (await portOwner(port)).listening) {
+      const o = await portOwner(port); if (o.pid) await run('kill', [o.pid])
+      await delay(1500); const a = await portOwner(port)
+      if (a.listening) await run('kill', [a.pid])
+      stepEnd(s, 'ok', `stopped :${port}`)
+    } else stepEnd(s, 'skip', 'not running')
+
+    s = stepStart('Drop database', db)
+    if (db && DB_NAME_RE.test(db)) {
+      const t = await resolveDbTarget()
+      const r = await run('mysql', ['-h', t.ok ? t.host : '127.0.0.1', '-P', t.ok ? String(t.port) : '3306', '-u', t.ok ? t.adminUser : 'root', '-e', `DROP DATABASE IF EXISTS \`${db}\`;`], 60000, mysqlEnv(t.ok ? t.adminPassword : ''))
+      stepEnd(s, r.failed ? 'warn' : 'ok', r.failed ? (r.stderr || '').slice(0, 200) : `dropped ${db}`)
+    } else stepEnd(s, 'skip', 'no MySQL database recorded')
+
+    s = stepStart('Remove worktrees + branches')
+    // Resolve (repo, dest) for every worktree BEFORE removing anything — removing the framework worktree
+    // (home) deletes the nested dirs and would orphan their registrations. Remove leaf-first:
+    // components → runtime → framework.
+    const dests = [
+      ...(await safeReaddir(join(home, 'runtime', 'component'))).map((n) => join(home, 'runtime', 'component', n)),
+      join(home, 'runtime'),
+      home,
+    ]
+    const pairs = []
+    for (const dest of dests) { if (!existsSync(dest)) continue; const repo = await sourceRepoOf(dest); if (repo) pairs.push({ repo, dest }) }
+    const repos = new Set(); let removed = 0
+    for (const { repo, dest } of pairs) {
+      const rr = await run('git', ['-C', repo, 'worktree', 'remove', '--force', dest], 60000)
+      if (!rr.failed) removed++
+      repos.add(repo)
+    }
+    for (const repo of repos) { await run('git', ['-C', repo, 'worktree', 'prune']); await run('git', ['-C', repo, 'branch', '-D', `env/${name}`]) }
+    try { await rm(home, { recursive: true, force: true }) } catch { /* */ }
+    stepEnd(s, 'ok', `removed ${removed} worktrees + env/${name} branches across ${repos.size} repos; deleted ${home}`)
+
+    job.receipt = { name, db, port, removedWorktrees: removed, repos: repos.size }
+    job.ok = true
+  } catch (e) { job.ok = false; job.error = String(e && e.message || e) }
+  finally { job.done = true; job.finishedAt = new Date().toISOString() }
+}
+async function safeReaddir(dir) { try { return (await readdir(dir)).filter((n) => n !== 'README' && !n.startsWith('.')) } catch { return [] } }
+
+async function apiEnvCreateStart(p) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const name = String(p.name || '').trim()
+  if (!ENV_NAME_RE.test(name)) return { ok: false, message: 'Name must be 1–31 chars: lowercase letters, numbers, _ or - (starting alphanumeric).' }
+  if (existsSync(join(CONFIG.envsDir, name))) return { ok: false, message: `An environment named "${name}" already exists.` }
+  const dbMode = ['copy', 'fresh', 'empty'].includes(p.dbMode) ? p.dbMode : 'copy'
+  const srcT = await resolveDbTarget()
+  if (!srcT.ok) return { ok: false, message: `Select a local MySQL environment to clone first — ${srcT.refuse}` }
+  newJob('create-env'); runCreateEnv({ name, dbMode, boot: !!p.boot })
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+async function apiEnvDeleteStart(p) {
+  const busy = jobBusy(); if (busy) return { ok: false, message: busy }
+  const name = String(p.name || '').trim()
+  if (!existsSync(join(CONFIG.envsDir, name))) return { ok: false, message: `No environment "${name}".` }
+  if (String(p.confirm || '') !== name) return { ok: false, message: `Type the environment name "${name}" to confirm deletion.` }
+  newJob('delete-env'); runDeleteEnv(name)
+  return { ok: true, started: true, jobId: JOB.id }
+}
+
+async function envPort(name) {
+  const p = await readConfProps(join(CONFIG.envsDir, name, 'runtime', 'conf', 'MoquiDevConf.xml'), ['webapp_http_port'])
+  return Number(p.webapp_http_port) || null
+}
+async function apiEnvStart(name) {
+  const home = join(CONFIG.envsDir, name)
+  if (!existsSync(home)) return { ok: false, message: `No environment "${name}".` }
+  const port = await envPort(name)
+  if (port && (await portOwner(port)).listening) return { ok: false, message: `"${name}" already running on :${port}.` }
+  const pid = spawnRun(home, join(home, 'runtime', 'log', 'devkit-db-job.log'))
+  return pid ? { ok: true, message: `Booting "${name}" on :${port} (pid ${pid}). First gradle build takes a few minutes — watch the dot.` } : { ok: false, message: 'Failed to launch.' }
+}
+async function apiEnvStop(name) {
+  const home = join(CONFIG.envsDir, name)
+  if (!existsSync(home)) return { ok: false, message: `No environment "${name}".` }
+  const port = await envPort(name)
+  if (!port) return { ok: false, message: 'No port recorded for this env.' }
+  const o = await portOwner(port)
+  if (!o.listening) return { ok: false, message: `"${name}" is not running on :${port}.` }
+  await run('kill', [o.pid]); await delay(1200)
+  const a = await portOwner(port)
+  return { ok: !a.listening, message: a.listening ? `:${port} still held by pid ${a.pid}.` : `Stopped "${name}" (:${port}).` }
 }
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
@@ -845,6 +1933,11 @@ const ROUTES = {
   '/api/local-apps': apiLocalApps,
   '/api/setup/plan': apiSetupPlan,
   '/api/version': () => checkVersion(true),
+  '/api/db/target': apiDbTarget,
+  '/api/db/snapshots': apiSnapshotList,
+  '/api/db/job': apiJob,
+  '/api/instances': apiInstances,
+  '/api/envs': apiEnvs,
 }
 
 const server = createServer(async (req, res) => {
@@ -865,6 +1958,15 @@ const server = createServer(async (req, res) => {
       if (path === '/api/action') return sendJson(await apiAction(p.target, p.action))
       if (path === '/api/pick-folder') return sendJson(await pickFolder(p.which))
       if (path === '/api/settings') return sendJson(setPath(p.which, p.path))
+      if (path === '/api/db/snapshot') return sendJson(await apiSnapshotStart(p.label))
+      if (path === '/api/db/reset') return sendJson(await apiResetStart(p.confirm))
+      if (path === '/api/db/revert') return sendJson(await apiRevertStart(p.snapshot, p.confirm))
+      if (path === '/api/setup/bootstrap') return sendJson(await apiBootstrapStart(p.workspace, p.confirm))
+      if (path === '/api/select-env') return sendJson(await apiSelectEnv(p.port))
+      if (path === '/api/envs/create') return sendJson(await apiEnvCreateStart(p))
+      if (path === '/api/envs/delete') return sendJson(await apiEnvDeleteStart(p))
+      if (path === '/api/envs/start') return sendJson(await apiEnvStart(String(p.name || '').trim()))
+      if (path === '/api/envs/stop') return sendJson(await apiEnvStop(String(p.name || '').trim()))
     }
     if (path === '/api/settings') return sendJson(await apiSettings())
     if (path === '/api/expectations') return sendJson(await apiExpectations(url.searchParams.get('set') || undefined))
