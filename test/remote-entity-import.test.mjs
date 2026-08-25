@@ -20,6 +20,7 @@ import {
   saveEntityExportResponse,
   sanitizeExcludedEntityReferences,
   sanitizeOrderCustomerData,
+  sanitizeShopifyShopRecord,
   splitEntityExportForLoad,
   validateEntityExport,
 } from '../lib/remote-entity-import.mjs'
@@ -40,12 +41,32 @@ test('uses the exact domain Keychain service for a HotWax source', () => {
 })
 
 test('only exposes fixed profiles without security or integration entities', () => {
-  assert.deepEqual(Object.keys(remoteEntityProfiles), ['products', 'catalog', 'inventory', 'catalog-inventory', 'orders-customers'])
+  assert.deepEqual(Object.keys(remoteEntityProfiles), ['products', 'catalog', 'inventory', 'catalog-inventory', 'orders-customers', 'shopify-shops'])
   for (const profile of Object.values(remoteEntityProfiles)) {
     assert.ok(profile.entities.length > 0)
     assert.equal(new Set(profile.entities).size, profile.entities.length)
     assert.equal(profile.entities.some((name) => /security|useraccount|integration|systemproperty/i.test(name)), false)
   }
+})
+
+test('Shopify shops use an explicit parent-before-child allowlist without remote credentials', () => {
+  const entities = getRemoteEntityProfile('shopify-shops').entities
+  const shop = entities.indexOf('co.hotwax.shopify.ShopifyShop')
+  assert.ok(shop >= 0)
+  for (const child of [
+    'co.hotwax.shopify.ShopifyConfig',
+    'co.hotwax.shopify.ShopifyShopLocation',
+    'co.hotwax.shopify.ShopifyShopProduct',
+    'co.hotwax.shopify.ShopifyShopOrder',
+    'co.hotwax.shopify.ShopifyShopCarrierShipment',
+    'co.hotwax.shopify.ShopifyShopTypeMapping',
+    'co.hotwax.shopify.ShopifyShopScript',
+    'co.hotwax.shopify.ShopifyShopSetting',
+    'co.hotwax.shopify.ShopifyInventoryChannel',
+  ]) assert.ok(shop < entities.indexOf(child), `${child} must follow ShopifyShop`)
+  assert.ok(entities.indexOf('co.hotwax.shopify.ShopifyShopProduct') < entities.indexOf('co.hotwax.shopify.ShopifyShopProductMetafield'))
+  assert.ok(entities.indexOf('co.hotwax.shopify.ShopifyMetafield') < entities.indexOf('co.hotwax.shopify.ShopifyShopProductMetafield'))
+  assert.equal(entities.some((name) => /SystemMessage|ShopifyShopRemote|ShopifyShopAppAccessScope|ShopifyShopUser|ShopifyOmsOrderRecon/.test(name)), false)
 })
 
 test('orders and customers use an explicit dependency-ordered allowlist', () => {
@@ -82,6 +103,18 @@ test('always rejects the secret-bearing SystemMessageRemote entity', () => {
     }),
     /SystemMessageRemote/,
   )
+})
+
+test('rejects Shopify entities linked to remote credentials or user accounts', () => {
+  for (const entity of [
+    'co.hotwax.shopify.config.ShopifyShopRemote',
+    'co.hotwax.shopify.ShopifyShopAppAccessScope',
+    'co.hotwax.shopify.ShopifyShopUser',
+    'co.hotwax.shopify.ShopifyOmsOrderRecon',
+    'moqui.service.message.SystemMessageTypeParameter',
+  ]) {
+    assert.throws(() => assertRemoteEntityProfileSafe({ id: 'unsafe', entities: [entity] }), /secret-bearing|security-linked/)
+  }
 })
 
 test('loads safe configuration and facility locations before inventory records', () => {
@@ -184,8 +217,32 @@ test('clears only fixed commerce target tables in dependency-safe order', () => 
   assert.match(orderSql, /`SHIPMENT`/)
   assert.doesNotMatch(orderSql, /`PARTY`|`PERSON`|`CONTACT_MECH`|SYSTEM_MESSAGE/)
   assert.ok(orderSql.indexOf('`ORDER_SHIPMENT`') < orderSql.indexOf('`ORDER_HEADER`'))
+  const shopifySql = remoteEntityResetSql('moqui', 'shopify-shops')
+  assert.match(shopifySql, /`SHOPIFY_SHOP`/)
+  assert.match(shopifySql, /`SHOPIFY_CONFIG`/)
+  assert.match(shopifySql, /`SHOPIFY_SHOP_LOCATION`/)
+  assert.match(shopifySql, /`SHOPIFY_INVENTORY_CHANNEL`/)
+  assert.ok(shopifySql.indexOf('`SHOPIFY_SHOP_PRODUCT_METAFIELD`') < shopifySql.indexOf('`SHOPIFY_SHOP_PRODUCT`'))
+  assert.ok(shopifySql.indexOf('`SHOPIFY_CONFIG`') < shopifySql.indexOf('`SHOPIFY_SHOP`'))
+  assert.doesNotMatch(shopifySql, /SYSTEM_MESSAGE|USER_LOGIN|PARTY|PRODUCT_STORE|ORDER_HEADER|DELETE FROM `moqui`\.`(?:PRODUCT|FACILITY)`;/)
   assert.throws(() => remoteEntityResetSql('moqui; DROP DATABASE moqui', 'catalog-inventory'), /database name/)
   assert.throws(() => remoteEntityResetSql('moqui', 'everything'), /reset profile/)
+})
+
+test('scrubs Shopify shop contact fields and every legacy credential field', () => {
+  const shop = sanitizeShopifyShopRecord('  <co.hotwax.shopify.ShopifyShop shopId="10000" name="Test Shop" email="owner@real.example" phone="3125550100" shopOwner="Real Owner" domain="shop.example"/>')
+  assert.doesNotMatch(shop, /owner@real\.example|3125550100|Real Owner/)
+  assert.match(shop, /email="test-shop-[a-f0-9]{12}@example\.invalid"/)
+  assert.match(shop, /phone="555[0-9]{7}"/)
+  assert.match(shop, /shopOwner="Test Shop Owner"/)
+  assert.match(shop, /domain="shop\.example"/)
+
+  const config = sanitizeShopifyShopRecord('  <co.hotwax.shopify.ShopifyConfig shopifyConfigId="CFG" shopifyConfigName="Shop" shopId="10000" apiVersion="2026-07" apiUrl="encrypted-url" username="encrypted-user" currentPassword="encrypted-password" accessToken="encrypted-token" clientId="real-client" sharedSecret="encrypted-secret" oldSharedSecret="old-secret" processRefund="Y"/>')
+  assert.doesNotMatch(config, /apiUrl=|username=|currentPassword=|accessToken=|clientId=|sharedSecret=|oldSharedSecret=|encrypted-|real-client|old-secret/)
+  assert.match(config, /shopifyConfigId="CFG"/)
+  assert.match(config, /shopId="10000"/)
+  assert.match(config, /apiVersion="2026-07"/)
+  assert.match(config, /processRefund="Y"/)
 })
 
 test('accepts only a non-empty Moqui XML entity export', () => {

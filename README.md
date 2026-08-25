@@ -71,8 +71,10 @@ The **Database** tab lets you iterate without fear of corrupting data:
   `hotwax-domain:hotwax.io` macOS Keychain item, verifies the source release commit is an ancestor of
   the local `maarg-docker-config` checkout, exports one fixed non-secret entity profile, then stops
   Moqui, creates/updates local MySQL through Moqui's raw entity loader, restarts, and deletes the
-  temporary XML. Profiles cover products, catalog, inventory, or catalog + inventory; security,
-  user-account, integration, and system-property entities are not selectable.
+  temporary XML. Profiles cover products, catalog, inventory, catalog + inventory, scrubbed
+  orders/customers, and Shopify shops + mappings. The Shopify profile removes shop contact PII and
+  every credential field from the legacy `ShopifyConfig` record before loading; `SystemMessageRemote`,
+  remote-link, user-account, security, and system-property entities are not selectable.
 - **Sync postal-code reference data** — reads the non-secret shared `postalCode` collection through
   the source instance's postal lookup API, copies it to local Solr in bounded seek-paginated batches,
   and hard-commits only after the local count matches the source. This is separate from OMS seed data:
