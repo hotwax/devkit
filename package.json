@@ -13,6 +13,7 @@
     "lib/bootstrap-config.mjs",
     "lib/bootstrap-process.mjs",
     "lib/bootstrap-solr.groovy",
+    "lib/db-cli.mjs",
     "lib/remote-entity-import.mjs",
     "lib/postal-code-sync.mjs",
     "README.md",

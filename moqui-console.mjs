@@ -51,6 +51,12 @@ import {
   postalCodeSchemaEnvironment,
   transferPostalCodePages,
 } from './lib/postal-code-sync.mjs'
+import {
+  parseCliArgs,
+  resolveSnapshotFile,
+  formatBytes,
+  CLI_HELP,
+} from './lib/db-cli.mjs'
 
 // ─── CONFIG (env-overridable defaults; per-project override via devkit.config.json) ──────────
 const CONFIG = {
@@ -1150,7 +1156,7 @@ async function apiBootstrapStart(root, confirm) {
 // exactly what they did. Secrets are resolved server-side and NEVER sent to the browser or the log.
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', ''])
-const DB_NAME_RE = /^[A-Za-z0-9_]+$/                       // safe to backtick-quote into SQL
+const DB_NAME_RE = /^[A-Za-z0-9_-]+$/                      // safe to backtick-quote into SQL
 const SNAP_LABEL_RE = /^[A-Za-z0-9_-]{1,64}$/              // safe as a filename segment
 const LOAD_CMD_RE = /^\.\/gradlew [A-Za-z0-9 ,=._-]+$/     // whitelist for the parsed DB_LOAD command
 const MYSQL_CONFS = new Set(['mysql8', 'mysql'])
@@ -1417,12 +1423,30 @@ async function ensureSnapshotDir(home) {
 
 // ── job model: one global current job, spawned long ops, status by poll ──
 let JOB = null
+let CLI_MODE = false
 function newJob(kind) {
   JOB = { id: 'job-' + Date.now(), kind, phase: 'starting', steps: [], pid: null, logFile: null, startedAt: new Date().toISOString(), finishedAt: null, done: false, ok: null, error: null, receipt: null }
   return JOB
 }
-function stepStart(name, detail) { const s = { name, status: 'running', detail: detail || '', startedAt: Date.now() }; JOB.steps.push(s); JOB.phase = name; return s }
-function stepEnd(s, status, detail) { s.status = status; if (detail !== undefined) s.detail = detail; s.ms = Date.now() - s.startedAt }
+function stepStart(name, detail) {
+  const s = { name, status: 'running', detail: detail || '', startedAt: Date.now() }
+  JOB.steps.push(s)
+  JOB.phase = name
+  if (CLI_MODE) {
+    console.log(`  ⏳ ${name}${detail ? ' (' + detail + ')' : ''}...`)
+  }
+  return s
+}
+function stepEnd(s, status, detail) {
+  s.status = status
+  if (detail !== undefined) s.detail = detail
+  s.ms = Date.now() - s.startedAt
+  if (CLI_MODE) {
+    if (status === 'ok') console.log(`  ✔ ${s.name}${detail ? ': ' + detail : ''}`)
+    else if (status === 'fail') console.error(`  ✖ ${s.name}${detail ? ': ' + detail : ''}`)
+    else if (status === 'skip') console.log(`  - ${s.name}${detail ? ': ' + detail : ''}`)
+  }
+}
 
 // Run the gradle load detached to a logfile (it streams for minutes). entity_ds_* are passed via the
 // CHILD ENV (not argv/log) so the password never leaks and the load targets the exact DB we wiped.
@@ -2477,18 +2501,223 @@ const server = createServer(async (req, res) => {
   }
 })
 
-server.listen(CONFIG.port, CONFIG.host, () => {
-  const root = accxuiRoot()
-  console.log(`\n  moqui-console (hotwax/devkit ${VERSION})  →  http://${CONFIG.host}:${CONFIG.port}   (localhost only; Start/Stop/Restart enabled)`)
-  console.log(`  mode: ${root ? 'PWA workspace ' + root : 'Moqui-only (pick your folders in Setup ⚙)'}`)
-  discover(true).then((d) => {
-    if (d.home) console.log(`  MOQUI_HOME = ${d.home}  (via ${d.source}${d.pid ? ', pid ' + d.pid : ''})\n`)
-    else console.log('  No Moqui found — open http://127.0.0.1:7070, click Setup ⚙, and pick your Moqui project folder.\n')
-  })
-  checkVersion().then((v) => {
-    if (v.stale) {
-      console.log(`  ⚠ devkit ${v.latest} is available — you're running ${v.current} (likely a cached npx clone).`)
-      console.log(`     Update:  ${v.updateCmd}\n`)
+// ─── CLI Command Handlers ───────────────────────────────────────────────────
+async function cliSnapshot(label) {
+  CLI_MODE = true
+  label = String(label || 'manual').trim()
+  if (!SNAP_LABEL_RE.test(label)) {
+    console.error(`\n  ✖ Invalid label "${label}". Label must be 1–64 characters (letters, numbers, _ or -).\n`)
+    process.exit(1)
+  }
+  const t = await resolveDbTarget()
+  if (!t.ok) {
+    console.error(`\n  ✖ Target error: ${t.refuse}\n`)
+    process.exit(1)
+  }
+  const d = await discover()
+  if (!d.home) {
+    console.error(`\n  ✖ No Moqui project found. Please run from inside your moqui checkout or set moquiHome in ~/.config/devkit/settings.json.\n`)
+    process.exit(1)
+  }
+  console.log(`\n  devkit snapshot · creating MySQL snapshot`)
+  console.log(`  Database:   ${t.database} @ ${t.host}:${t.port} (user: ${t.user})`)
+  console.log(`  Moqui Home: ${d.home}\n`)
+
+  newJob('snapshot')
+  await runSnapshot(label)
+  if (!JOB.ok) {
+    console.error(`\n  ✖ Snapshot failed: ${JOB.error}\n`)
+    process.exit(1)
+  }
+  const r = JOB.receipt
+  console.log(`\n  Snapshot created successfully:`)
+  console.log(`    File:     ${join('runtime', 'db-snapshots', r.file)}`)
+  console.log(`    Size:     ${formatBytes(r.bytes)}`)
+  console.log(`    Database: ${r.db}`)
+  console.log(`    Git:      ${r.gitBranch || 'unknown'}${r.gitSha ? ' (' + r.gitSha + ')' : ''}`)
+  console.log(`    Created:  ${r.created}`)
+  console.log(`\n  To restore this snapshot at any time:`)
+  console.log(`    devkit restore ${r.file}\n`)
+}
+
+async function cliSnapshots() {
+  const res = await apiSnapshotList()
+  console.log(`\n  devkit snapshots · ${res.snapshots.length} snapshot(s) found`)
+  console.log(`  Directory: ${res.dir || 'runtime/db-snapshots'}\n`)
+  if (!res.snapshots.length) {
+    console.log(`  No snapshots saved yet. Create one with: devkit snapshot [label]\n`)
+    return
+  }
+  for (let i = 0; i < res.snapshots.length; i++) {
+    const s = res.snapshots[i]
+    console.log(`  [${i + 1}] ${s.file}`)
+    console.log(`      Label:    ${s.label}`)
+    console.log(`      Created:  ${s.createdAt}`)
+    console.log(`      Size:     ${formatBytes(s.bytes)}`)
+    console.log(`      Database: ${s.db || 'unknown'}`)
+    if (s.gitBranch || s.gitSha) console.log(`      Git:      ${s.gitBranch || ''}${s.gitSha ? ' (' + s.gitSha + ')' : ''}`)
+    console.log()
+  }
+  console.log(`  Restore with: devkit restore <file|label>\n`)
+}
+
+async function cliRestore(target, options = {}) {
+  CLI_MODE = true
+  if (!target) {
+    console.error(`\n  ✖ Missing snapshot target to restore. Specify a file or label.`)
+    console.error(`    Usage: devkit restore <file|label> [-y]\n`)
+    process.exit(1)
+  }
+  const d = await discover()
+  if (!d.home) {
+    console.error(`\n  ✖ No Moqui project found.\n`)
+    process.exit(1)
+  }
+  const listRes = await apiSnapshotList()
+  const resolvedFile = resolveSnapshotFile(target, listRes.snapshots)
+  if (!resolvedFile) {
+    console.error(`\n  ✖ Snapshot "${target}" not found in ${listRes.dir || 'runtime/db-snapshots'}.`)
+    console.error(`    Run "devkit snapshots" to list available snapshots.\n`)
+    process.exit(1)
+  }
+  const t = await resolveDbTarget()
+  if (!t.ok) {
+    console.error(`\n  ✖ Target error: ${t.refuse}\n`)
+    process.exit(1)
+  }
+  console.log(`\n  devkit restore · restoring MySQL from snapshot`)
+  console.log(`  Snapshot:   ${resolvedFile}`)
+  console.log(`  Target DB:  ${t.database} @ ${t.host}:${t.port}`)
+  console.log(`  WARNING:    All current data in \`${t.database}\` will be replaced!\n`)
+
+  if (!options.yes) {
+    const readline = await import('node:readline/promises')
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    const answer = await rl.question(`  Type "${t.database}" to confirm restore: `)
+    rl.close()
+    if (answer.trim() !== t.database) {
+      console.log(`\n  Restore cancelled.\n`)
+      return
     }
+    console.log()
+  }
+
+  newJob('revert')
+  await runRevert(resolvedFile)
+  if (!JOB.ok) {
+    console.error(`\n  ✖ Restore failed: ${JOB.error}\n`)
+    process.exit(1)
+  }
+  console.log(`\n  Database restored successfully from ${resolvedFile}\n`)
+}
+
+async function cliReset(options = {}) {
+  CLI_MODE = true
+  const t = await resolveDbTarget()
+  if (!t.ok) {
+    console.error(`\n  ✖ Target error: ${t.refuse}\n`)
+    process.exit(1)
+  }
+  console.log(`\n  devkit reset · resetting MySQL database to base seed data`)
+  console.log(`  Target DB:  ${t.database} @ ${t.host}:${t.port}`)
+  console.log(`  WARNING:    All current data in \`${t.database}\` will be dropped and reloaded!\n`)
+
+  if (!options.yes) {
+    const readline = await import('node:readline/promises')
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    const answer = await rl.question(`  Type "${t.database}" to confirm reset: `)
+    rl.close()
+    if (answer.trim() !== t.database) {
+      console.log(`\n  Reset cancelled.\n`)
+      return
+    }
+    console.log()
+  }
+
+  newJob('reset')
+  await runReset()
+  if (!JOB.ok) {
+    console.error(`\n  ✖ Reset failed: ${JOB.error}\n`)
+    process.exit(1)
+  }
+  console.log(`\n  Database reset successfully.\n`)
+}
+
+async function cliStatus() {
+  console.log(`\n  devkit status · (hotwax/devkit ${VERSION})`)
+  const d = await discover(true)
+  console.log(`  MOQUI_HOME:    ${d.home || 'none found'}${d.source ? ' (via ' + d.source + (d.pid ? ', pid ' + d.pid : '') + ')' : ''}`)
+  const t = await resolveDbTarget()
+  if (t.ok) {
+    const ping = await dbPing(t, 'user')
+    const counts = ping.ok ? await dbCounts(t).catch(() => null) : null
+    console.log(`  Database:      ${t.database} @ ${t.host}:${t.port} (conf: ${t.dbConf}, user: ${t.user})`)
+    console.log(`  DB Status:     ${ping.ok ? 'connected' : 'connection failed (' + ping.error + ')'}`)
+    if (counts) console.log(`  DB Stats:      ${counts.tables} tables, ~${counts.rows.toLocaleString()} rows`)
+  } else {
+    console.log(`  Database:      ${t.refuse}`)
+  }
+  const solr = await solrStatus('http://localhost:8983/solr')
+  console.log(`  Solr (8983):   ${solr.up ? 'running (' + (solr.mode || 'up') + ')' : 'not reachable'}`)
+  const root = accxuiRoot()
+  if (root) console.log(`  PWA Workspace: ${root}`)
+  console.log()
+}
+
+function startServer(portOverride) {
+  const port = portOverride || CONFIG.port
+  server.listen(port, CONFIG.host, () => {
+    const root = accxuiRoot()
+    console.log(`\n  moqui-console (hotwax/devkit ${VERSION})  →  http://${CONFIG.host}:${port}   (localhost only; Start/Stop/Restart enabled)`)
+    console.log(`  mode: ${root ? 'PWA workspace ' + root : 'Moqui-only (pick your folders in Setup ⚙)'}`)
+    discover(true).then((d) => {
+      if (d.home) console.log(`  MOQUI_HOME = ${d.home}  (via ${d.source}${d.pid ? ', pid ' + d.pid : ''})\n`)
+      else console.log(`  No Moqui found — open http://${CONFIG.host}:${port}, click Setup ⚙, and pick your Moqui project folder.\n`)
+    })
+    checkVersion().then((v) => {
+      if (v.stale) {
+        console.log(`  ⚠ devkit ${v.latest} is available — you're running ${v.current} (likely a cached npx clone).`)
+        console.log(`     Update:  ${v.updateCmd}\n`)
+      }
+    })
   })
+}
+
+// ─── CLI Entrypoint ──────────────────────────────────────────────────────────
+async function main() {
+  const parsed = parseCliArgs(process.argv.slice(2))
+  switch (parsed.command) {
+    case 'help':
+      console.log(CLI_HELP)
+      process.exit(0)
+    case 'version':
+      console.log(`devkit v${VERSION}`)
+      process.exit(0)
+    case 'snapshot':
+      await cliSnapshot(parsed.label)
+      break
+    case 'snapshots':
+      await cliSnapshots()
+      break
+    case 'restore':
+      await cliRestore(parsed.target, parsed.options)
+      break
+    case 'reset':
+      await cliReset(parsed.options)
+      break
+    case 'status':
+      await cliStatus()
+      break
+    case 'serve':
+      startServer(parsed.options.port)
+      break
+    default:
+      console.error(`\n  ✖ Unknown command "${parsed.raw}". Run "devkit --help" for usage.\n`)
+      process.exit(1)
+  }
+}
+
+main().catch((err) => {
+  console.error('\n  ✖ Unexpected error:', err)
+  process.exit(1)
 })
