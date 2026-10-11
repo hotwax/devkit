@@ -747,7 +747,8 @@ async function startMoqui() {
     return { ok: true, message: `Launched Moqui in screen "${screen}" via the run script. Booting (~60s) — watch the status dot.` }
   }
   if (!d.home) return { ok: false, message: 'No MOQUI_HOME found — set MOQUI_HOME or run from inside the checkout.' }
-  const cmd = `cd ${d.home} && export JAVA_HOME=${CONFIG.java11Home} && export PATH="$JAVA_HOME/bin:$PATH" && exec ./gradlew run >> runtime/log/moqui-console.log 2>&1`
+  const portArg = mport === CONFIG.ports.moqui ? '' : ` --args='moqui.war port=${mport}'`
+  const cmd = `cd ${d.home} && export JAVA_HOME=${CONFIG.java11Home} && export PATH="$JAVA_HOME/bin:$PATH" && exec ./gradlew run${portArg} >> runtime/log/moqui-console.log 2>&1`
   const r = await run('screen', ['-dmS', screen, 'bash', '-c', cmd])
   if (r.failed) return { ok: false, message: `Failed to launch: ${r.stderr || r.code}` }
   return { ok: true, message: `Launched Moqui (gradlew run) from ${d.home} in screen "${screen}". Booting (~60s).` }
@@ -2233,12 +2234,13 @@ function copyDatabase(srcT, dstT) {
   })
 }
 
-// Boot a cloned env: gradlew run from its home (port + DB come from its own conf). Detached; not awaited.
-function spawnRun(envHome, logFile) {
+// Boot a cloned env: the database comes from its own conf and Jetty requires an explicit port argument. Detached; not awaited.
+function spawnRun(envHome, logFile, port = null) {
   let fd
   try { mkdirSync(dirname(logFile), { recursive: true }); fd = openSync(logFile, 'a'); writeSync(fd, `\n=== devkit env boot · ${new Date().toISOString()} ===\n`) } catch { return null }
   const env = { ...process.env, PATH: `${CONFIG.java11Home}/bin:${SANE_PATH}`, JAVA_HOME: CONFIG.java11Home }
-  const child = spawn('bash', ['-c', `cd ${shq(envHome)} && exec ./gradlew --no-daemon run`], { detached: true, stdio: ['ignore', fd, fd], env })
+  const portArg = Number.isInteger(Number(port)) && Number(port) > 0 ? ` --args='moqui.war port=${Number(port)}'` : ''
+  const child = spawn('bash', ['-c', `cd ${shq(envHome)} && exec ./gradlew --no-daemon run${portArg}`], { detached: true, stdio: ['ignore', fd, fd], env })
   child.unref()
   return child.pid
 }
@@ -2329,7 +2331,7 @@ async function runCreateEnv({ name, dbMode, boot }) {
     if (boot) {
       s = stepStart('Boot environment', `gradlew run on :${port}`)
       job.logFile = join(envHome, 'runtime', 'log', 'devkit-db-job.log')
-      const pid = spawnRun(envHome, job.logFile)
+      const pid = spawnRun(envHome, job.logFile, port)
       booted = !!pid
       stepEnd(s, booted ? 'ok' : 'fail', booted ? `building + starting (pid ${pid}); first build takes a few minutes — watch :${port}` : 'failed to launch')
     }
@@ -2423,7 +2425,7 @@ async function apiEnvStart(name) {
   if (!existsSync(home)) return { ok: false, message: `No environment "${name}".` }
   const port = await envPort(name)
   if (port && (await portOwner(port)).listening) return { ok: false, message: `"${name}" already running on :${port}.` }
-  const pid = spawnRun(home, join(home, 'runtime', 'log', 'devkit-db-job.log'))
+  const pid = spawnRun(home, join(home, 'runtime', 'log', 'devkit-db-job.log'), port)
   return pid ? { ok: true, message: `Booting "${name}" on :${port} (pid ${pid}). First gradle build takes a few minutes — watch the dot.` } : { ok: false, message: 'Failed to launch.' }
 }
 async function apiEnvStop(name) {
